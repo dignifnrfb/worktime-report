@@ -1,0 +1,15 @@
+{
+  "baseUrl": "https://oa.mech-mind.com.cn",
+  "workflowId": 197,
+  "workType": {
+    "name": "展会",
+    "code": "002"
+  },
+  "projectCode": "B221009999",
+  "projectId": "B221009999",
+  "projectName": "展会组日常运维（仅工时使用）",
+  "hours": "8.0",
+  "remark": "",
+  "skipWeekends": true,
+  "workdayOverrides": {}
+}
