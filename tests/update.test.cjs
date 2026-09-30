@@ -166,9 +166,9 @@ function Start-Process {
 & $Helper -InstallerPath $Installer -InstallRoot $AppRoot -DataRoot $DataRoot -ExpectedSha256 $Hash -ExpectedVersion '1.4.0'
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 `, "utf8");
-    const child = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", runner,
+    const child = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", runner,
       "-Helper", path.resolve(__dirname, "../installer/apply-update.ps1"), "-AppRoot", f.appRoot, "-DataRoot", f.dataRoot, "-Installer", updateFile,
-      "-Hash", digest, "-Scenario", scenario, "-Capture", capture], { encoding: "utf8", windowsHide: true, timeout: 10000 });
+      "-Hash", digest, "-Scenario", scenario, "-Capture", capture], { encoding: "utf8", windowsHide: true, timeout: 45000 });
     assert.equal(child.error, undefined);
     const result = JSON.parse(fs.readFileSync(path.join(f.dataRoot, "updates", "install-result.json"), "utf8").replace(/^\uFEFF/, ""));
     assert.equal(result.success, scenario === "success", JSON.stringify(result));

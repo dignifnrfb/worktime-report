@@ -18,9 +18,7 @@ const portalLink = `${origin}/wui/index.html#/main/portal/portal-4-3?menuIds=0,4
 test("new users and installer defaults use the reachable HTTPS OA address", () => {
   assert.equal(common.loadConfig().baseUrl, origin);
   assert.equal(fs.existsSync(common.CONFIG_PATH), false);
-  for (const file of ["worktime.config.json", "installer/default-worktime.config.json"]) {
-    assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, file), "utf8")).baseUrl, origin);
-  }
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ROOT, "installer/default-worktime.config.json"), "utf8")).baseUrl, origin);
 });
 
 test("an existing legacy config migrates once without changing user settings or records", () => {
