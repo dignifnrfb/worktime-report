@@ -765,12 +765,18 @@ async function* iterateWorktimeForms(context, firstPage, config, dates, options 
     for (const [index, dateText] of dates.entries()) {
       const current = next;
       next = null;
-      const page = current?.page || (!options.submit || index === 0 ? firstPage : await context.newPage());
+      let page = current?.page || (!options.submit || index === 0 ? firstPage : await context.newPage());
       let preloaded = false;
       if (current) {
         const outcome = await current.ready;
         preloaded = outcome.ok;
-        if (!preloaded) log.warn("fill", "form.preload.fallback", "表单预加载未完成，按原流程重新加载", { date: dateText });
+        if (!preloaded) {
+          // A failed navigation can still commit Chrome's error document after
+          // goto rejects. Discard that page before loading a fresh blank form.
+          await page.close().catch(() => {});
+          page = await context.newPage();
+          log.warn("fill", "form.preload.fallback", "表单预加载未完成，按原流程重新加载", { date: dateText });
+        }
       }
       if (options.submit && options.preload !== false && index + 1 < dates.length) {
         let ahead;

@@ -386,8 +386,14 @@ test("batch preloading overlaps only blank-page loads and still fills and submit
 
 test("a failed speculative load falls back to normal loading without retrying submission", async (t) => {
   const { page, dates, stats, config } = await batchFormFixture(t, { failAhead: true });
+  let failedPage;
   for await (const item of assistant.iterateWorktimeForms(page.context(), page, config, dates.slice(0, 2), { submit: true })) {
     assert.equal(item.preloaded, false);
+    if (item.index === 0) failedPage = page.context().pages().find(candidate => candidate !== page);
+    else {
+      assert.ok(failedPage.isClosed(), "Discard the failed speculative navigation before fallback");
+      assert.notEqual(item.page, failedPage);
+    }
     await assistant.prepareForm(item.page, config, item.dateText, { preloaded: item.preloaded });
     await assistant.submitPreparedForm(item.page);
     await item.page.waitForFunction(() => document.body.innerText.includes("提交成功"));
