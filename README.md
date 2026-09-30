@@ -2,6 +2,8 @@
 
 工时助手的源码和 Windows 安装包发布仓库。
 
+[下载安装包](https://github.com/dignifnrfb/worktime-report/releases/latest) · [发布记录](https://github.com/dignifnrfb/worktime-report/releases)
+
 Windows 本机工时工具：钉钉扫码登录公司 OA，核对已办工时，选择日期批量预演、提交和调整工作日。
 
 ## 安装和更新
