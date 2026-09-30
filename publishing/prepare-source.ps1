@@ -10,7 +10,7 @@ $files = @(
   'dashboard-server.cjs', 'worktime.cjs', 'worktime-api.cjs', 'worktime-common.cjs',
   'worktime-log.cjs', 'worktime-progress.cjs', 'worktime-update.cjs',
   '启动工时面板.cmd', '启动工时面板.ps1',
-  'dashboard\package.json', 'dashboard\pnpm-lock.yaml', 'dashboard\tsconfig.json',
+  'dashboard\package.json', 'dashboard\pnpm-lock.yaml', 'dashboard\pnpm-workspace.yaml', 'dashboard\tsconfig.json',
   'dashboard\tsconfig.portable.json', 'dashboard\eslint.config.mjs',
   'dashboard\postcss.config.mjs', 'dashboard\portable.vite.config.ts',
   'dashboard\portable\main.tsx', 'dashboard\portable\index.html',

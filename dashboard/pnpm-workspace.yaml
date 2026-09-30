@@ -1,0 +1,5 @@
+# Explicit lifecycle choices for reproducible, non-interactive portable builds.
+allowBuilds:
+  esbuild: true
+  sharp: false
+  workerd: false
