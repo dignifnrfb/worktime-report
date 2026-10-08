@@ -594,6 +594,7 @@ async function uiPage(t, state) {
       const body = route.request().postData() ? JSON.parse(route.request().postData()) : {};
       state.requests.push({ pathname: url.pathname, body });
       if (url.pathname === "/api/dashboard") {
+        if (state.offlineDashboard) return route.abort("connectionrefused");
         const snapshot = structuredClone(state.dashboard);
         if (state.holdNextDashboard) {
           state.holdNextDashboard = false;
@@ -1147,4 +1148,43 @@ test("busy OA work blocks update installation and an update error leaves ordinar
   await dialog.getByRole("button", { name: "关闭", exact: true }).click();
   await page.getByRole("button", { name: /^2026-09-02/ }).click();
   assert.equal(await page.getByRole("button", { name: "提交 1 天", exact: true }).isEnabled(), true);
+});
+
+for (const status of ["restart_required", "attention_required"]) {
+  test(`update ${status} explains the next step and prevents another installation`, async (t) => {
+    const update = updateState(status);
+    update.error = status === "attention_required" ? "未收到安装完成结果，请检查安装进程和版本后重新打开工时助手。" : null;
+    const state = { dashboard: dashboard({ update }) };
+    const page = await uiPage(t, state);
+    await page.getByRole("button", { name: /版本与更新/ }).click();
+    const dialog = page.getByRole("dialog", { name: "版本与更新" });
+    const text = status === "restart_required" ? "更新已安装完成，请关闭旧窗口，从桌面重新打开工时助手。" : update.error;
+    await dialog.getByText(text, { exact: true }).first().waitFor();
+    assert.doesNotMatch(await dialog.innerText(), /正在安装，请稍候/);
+    assert.equal(await dialog.getByRole("button", { name: "安装更新", exact: true }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "⚙ 默认设置" }).isEnabled(), false);
+    state.dashboard.update = { ...updateState("up_to_date"), currentVersion: "1.4.0", lastInstall: { success: true, version: "1.4.0", error: null } };
+    await page.clock.runFor(3100);
+    await dialog.getByText("上次更新已完成：1.4.0", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "⚙ 默认设置" }).isEnabled(), true);
+  });
+}
+
+test("an offline old page stops indefinite installation wording and recovers on the new service", async (t) => {
+  const state = { dashboard: dashboard({ update: updateState("installing") }) };
+  const page = await uiPage(t, state);
+  await page.getByRole("button", { name: /版本与更新/ }).click();
+  const dialog = page.getByRole("dialog", { name: "版本与更新" });
+  state.offlineDashboard = true;
+  await page.clock.runFor(151_000);
+  await dialog.getByText(/安装结果尚未确认，请检查是否仍有安装程序运行/).waitFor();
+  assert.doesNotMatch(await dialog.innerText(), /正在安装，请稍候/);
+  assert.equal(state.requests.filter((r) => r.pathname === "/api/updates/install").length, 0);
+  assert.equal(await page.getByRole("button", { name: "⚙ 默认设置" }).isEnabled(), false);
+  state.offlineDashboard = false;
+  state.dashboard.update = { ...updateState("up_to_date"), currentVersion: "1.4.0", lastInstall: { success: true, version: "1.4.0", error: null } };
+  await page.clock.runFor(3100);
+  await dialog.getByText("上次更新已完成：1.4.0", { exact: true }).waitFor();
+  assert.doesNotMatch(await dialog.innerText(), /安装结果尚未确认/);
+  assert.equal(await page.getByRole("button", { name: "⚙ 默认设置" }).isEnabled(), true);
 });

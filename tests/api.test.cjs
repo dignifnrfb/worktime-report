@@ -450,3 +450,17 @@ test("installation state blocks OA jobs and default or calendar writes", async (
     assert.equal(service.buildDashboard().update.status, "installing");
   } finally { service.updates.state.status = "not_configured"; }
 });
+
+test("completed and unconfirmed installations block writes with their actual next step", async () => {
+  try {
+    for (const status of ["restart_required", "attention_required"]) {
+      service.updates.state.status = status;
+      service.updates.state.error = "安装结果未确认，请检查安装进程后重新打开工时助手。";
+      const response = await post("/api/submit", {});
+      assert.equal(response.status, 409);
+      assert.match(response.body.error, status === "restart_required" ? /已安装完成.*重新打开/ : /安装结果未确认/);
+      assert.doesNotMatch(response.body.error, /正在安装更新/);
+      assert.equal((await post("/api/updates/install", { confirm: true })).status, 409);
+    }
+  } finally { service.updates.state.status = "not_configured"; service.updates.state.error = null; }
+});

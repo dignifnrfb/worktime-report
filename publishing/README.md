@@ -14,6 +14,8 @@ Windows 本机工时工具：钉钉扫码登录公司 OA，核对已办工时，
 
 1.3.1 修复跨月补报时可能误选同一日号、随后等待超时的问题。日期选择根据 OA 日历实际年月切换，支持跨年；日期未生效时显示目标和实际日期。保留完整日期核对、重复填报校验及失败停止后续日期的行为。
 
+1.3.2 修复更新后长期显示“正在安装”的问题。安装已完成但旧服务仍在运行时提示重新打开；安装助手缺失、退出或未返回结果时给出对应提示。旧页面等待新服务过久时提示检查安装结果，恢复连接后自动清除。安装结果不明确时不会自动再次启动安装。
+
 GitHub 网络失败不影响普通填报。只安装数字正式版本，下载后核对大小及 SHA-256。安装失败不自动重试。
 
 ## 日常使用
@@ -39,7 +41,7 @@ pnpm --dir dashboard install --frozen-lockfile
 pnpm --dir dashboard run typecheck:portable
 pnpm --dir dashboard run lint:portable
 pnpm --dir dashboard run test:regression
-powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.1 -GitHubRepository 账号/仓库名
+powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.2 -GitHubRepository 账号/仓库名
 powershell -NoProfile -File tests/installer.test.ps1
 ```
 

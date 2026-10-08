@@ -189,7 +189,70 @@ test("a surviving service reads helper failures while timed-out installations re
     writeJson(resultFile, { success: false, version: "1.4.0", completedAt: new Date(Date.now() - 10000).toISOString(), error: "previous failure" });
     assert.equal(f.manager.snapshot().status, "installing", "An old result must not unlock this attempt");
     writeJson(resultFile, { success: false, version: "1.4.0", completedAt: new Date(Date.now() + 100).toISOString(), error: "installer failed", requiresAttention });
-    assert.equal(f.manager.snapshot().status, requiresAttention ? "installing" : "error");
+    assert.equal(f.manager.snapshot().status, requiresAttention ? "attention_required" : "error");
     assert.equal(f.manager.snapshot().lastInstall.error, "installer failed");
+    assert.equal(f.manager.installing(), requiresAttention);
   }
+});
+
+test("completed installation on a surviving old service requests restart and the new service clears the lock", async (t) => {
+  const f = fixture(t); await f.manager.check(); await f.manager.download(); await f.manager.install();
+  fs.writeFileSync(path.join(f.appRoot, "VERSION"), "1.4.0");
+  writeJson(path.join(f.dataRoot, "updates", "install-result.json"), { success: true, version: "1.4.0", completedAt: new Date(Date.now() + 100).toISOString() });
+  assert.equal(f.manager.snapshot().status, "restart_required");
+  assert.equal(f.manager.snapshot().currentVersion, "1.3.0", "The old runtime must not pretend it has restarted");
+  assert.match(f.manager.installationMessage(), /已安装完成.*重新打开/);
+  assert.equal(f.manager.installing(), true);
+  await assert.rejects(f.manager.install(), /正在进行/);
+  const restarted = new UpdateManager({ appRoot: f.appRoot, dataRoot: f.dataRoot, fetchImpl: async () => Response.json(release()) });
+  assert.equal((await restarted.check()).status, "up_to_date");
+  assert.equal(restarted.installing(), false);
+  assert.equal(restarted.snapshot().lastInstall.success, true);
+});
+
+test("installation success with a mismatching installed version requests inspection", async (t) => {
+  const f = fixture(t); await f.manager.check(); await f.manager.download(); await f.manager.install();
+  writeJson(path.join(f.dataRoot, "updates", "install-result.json"), { success: true, version: "1.4.0", completedAt: new Date(Date.now() + 100).toISOString() });
+  assert.equal(f.manager.snapshot().status, "attention_required");
+  assert.match(f.manager.installationMessage(), /版本不一致/);
+  assert.equal(f.manager.installing(), true);
+});
+
+test("missing installation results stop indefinite waiting without authorizing another installer", async (t) => {
+  const f = fixture(t); await f.manager.check(); await f.manager.download(); await f.manager.install();
+  f.manager.installStartedAt -= 150_001;
+  assert.equal(f.manager.snapshot().status, "attention_required");
+  assert.match(f.manager.installationMessage(), /未收到安装完成结果/);
+  await assert.rejects(f.manager.install(), /正在进行/);
+  assert.equal(f.launches.length, 1);
+  // A late verified outcome replaces the unknown result without relaunching.
+  fs.writeFileSync(path.join(f.appRoot, "VERSION"), "1.4.0");
+  writeJson(path.join(f.dataRoot, "updates", "install-result.json"), { success: true, version: "1.4.0", completedAt: new Date().toISOString() });
+  assert.equal(f.manager.snapshot().status, "restart_required");
+});
+
+test("operation-lock checks detect an ordinary helper failure before a dashboard poll", async (t) => {
+  const f = fixture(t); await f.manager.check(); await f.manager.download(); await f.manager.install();
+  writeJson(path.join(f.dataRoot, "updates", "install-result.json"), { success: false, version: "1.4.0", completedAt: new Date(Date.now() + 100).toISOString(), error: "Access denied", requiresAttention: false });
+  assert.equal(f.manager.installing(), false);
+  assert.equal(f.manager.snapshot().status, "error");
+  assert.match(f.manager.snapshot().error, /Access denied/);
+});
+
+test("a missing helper fails immediately before starting PowerShell", async (t) => {
+  const f = fixture(t, { launchInstaller: undefined });
+  await f.manager.check(); await f.manager.download();
+  await assert.rejects(f.manager.install(), /安装助手文件缺失/);
+  assert.equal(f.manager.snapshot().status, "error");
+  assert.equal(f.manager.installing(), false);
+});
+
+test("an exited helper without a result requests inspection instead of endless installation", { skip: process.platform !== "win32" }, async (t) => {
+  const f = fixture(t, { launchInstaller: undefined });
+  fs.writeFileSync(path.join(f.appRoot, "apply-update.ps1"), "exit 1\n");
+  await f.manager.check(); await f.manager.download(); await f.manager.install();
+  for (let attempt = 0; attempt < 60 && f.manager.snapshot().status === "installing"; attempt++) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(f.manager.snapshot().status, "attention_required");
+  assert.match(f.manager.installationMessage(), /安装助手已退出/);
+  assert.equal(f.manager.installing(), true);
 });

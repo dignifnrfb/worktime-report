@@ -16,7 +16,7 @@ type ProjectCatalog = { count: number; sourceTotal: number; fetchedAt: string | 
 type WorkTypeOption = { code: string; name: string };
 type WorkTypeCatalog = { count: number; sourceTotal: number; fetchedAt: string | null };
 type UpdateStatus = {
-  status: "idle" | "not_configured" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "installing" | "error";
+  status: "idle" | "not_configured" | "checking" | "up_to_date" | "available" | "downloading" | "ready" | "installing" | "restart_required" | "attention_required" | "error";
   currentVersion: string; latestVersion: string | null; repository: string; canInstall: boolean;
   releaseNotes: string; percent: number; error: string | null;
   lastInstall: { success: boolean; version: string; error: string | null } | null;
@@ -433,7 +433,15 @@ export default function Home() {
   const [updatePending, setUpdatePending] = useState(false);
   const [updateConfirming, setUpdateConfirming] = useState(false);
   const updateRequestRef = useRef(false);
-  const installing = data?.update?.status === "installing";
+  const installing = ["installing", "restart_required", "attention_required"].includes(data?.update?.status || "");
+  const [installWaitExpired, setInstallWaitExpired] = useState(false);
+  const installationNotice = data?.update?.status === "restart_required"
+    ? "更新已安装完成，请关闭旧窗口，从桌面重新打开工时助手。"
+    : data?.update?.status === "attention_required"
+      ? data.update.error || "安装结果尚未确认，请检查安装进程和版本后重新打开工时助手。"
+      : installWaitExpired
+        ? "安装结果尚未确认，请检查是否仍有安装程序运行；确认安装程序已结束后，从桌面重新打开工时助手。"
+        : "正在安装，请稍候。完成后自动重新打开工时助手。";
   const [now, setNow] = useState(() => new Date());
 
   const today = new Intl.DateTimeFormat("en-CA", {
@@ -444,6 +452,7 @@ export default function Home() {
   const previousMonth = shiftMonth(thisMonth, -1);
 
   function applyDashboard(dashboard: DashboardData) {
+    if (dashboard.update?.status !== "installing") setInstallWaitExpired(false);
     dashboardVersionRef.current += 1;
     const account = accountIdentity(dashboard.account);
     if (accountRef.current !== null && accountRef.current !== account) {
@@ -567,6 +576,13 @@ export default function Home() {
     const timer = window.setTimeout(() => setToast(null), 5_000);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  useEffect(() => {
+    if (data?.update?.status !== "installing") return;
+    // The old page can remain open if the replacement service never starts.
+    const timer = window.setTimeout(() => setInstallWaitExpired(true), 150_000);
+    return () => window.clearTimeout(timer);
+  }, [data?.update?.status]);
 
   const recordsByDate = useMemo(
     () => new Map((data?.records || []).map((record) => [record.workDate, record])),
@@ -703,7 +719,7 @@ export default function Home() {
   }
 
   async function startLogin(force: boolean) {
-    if (loginStartingRef.current || dashboardRef.current?.update?.status === "installing") return;
+    if (loginStartingRef.current || ["installing", "restart_required", "attention_required"].includes(dashboardRef.current?.update?.status || "")) return;
     loginStartingRef.current = true;
     loginAttemptedRef.current = true;
     loginInProgressRef.current = true;
@@ -985,8 +1001,8 @@ export default function Home() {
         <article className="stat-card warning"><div className="stat-label">已选择 / 待补</div><div className="stat-value">{selectedDates.length}<span> / {missingDates.length} 天</span></div><div className="stat-foot">按调整后的工作日计算</div></article>
       </section>
 
-      {(error || serviceOffline) && <div className="error-banner" role="alert"><span>!</span><p>{installing ? "正在安装更新，服务暂时断开。完成后会重新打开工时助手。" : error || "本地工时服务连接中断，正在重新连接；当前显示的是上次读取的数据。"}</p>{error && <button onClick={() => setError(null)} aria-label="关闭提示">×</button>}</div>}
-      {data.update && ["available", "downloading", "ready", "installing"].includes(data.update.status) && <div className="update-banner" role="status"><p>{installing ? "正在安装更新，完成后自动重新打开" : data.update.status === "downloading" ? `正在下载新版 · ${data.update.percent}%` : data.update.status === "ready" ? "新版已下载并校验，可安装更新" : `发现新版 ${data.update.latestVersion}`}</p><button className="text-button" onClick={() => setUpdatesOpen(true)}>查看更新</button></div>}
+      {(error || serviceOffline) && <div className="error-banner" role="alert"><span>!</span><p>{installing ? installationNotice : error || "本地工时服务连接中断，正在重新连接；当前显示的是上次读取的数据。"}</p>{error && <button onClick={() => setError(null)} aria-label="关闭提示">×</button>}</div>}
+      {data.update && ["available", "downloading", "ready", "installing", "restart_required", "attention_required"].includes(data.update.status) && <div className="update-banner" role="status"><p>{installing ? installationNotice : data.update.status === "downloading" ? `正在下载新版 · ${data.update.percent}%` : data.update.status === "ready" ? "新版已下载并校验，可安装更新" : `发现新版 ${data.update.latestVersion}`}</p><button className="text-button" onClick={() => setUpdatesOpen(true)}>查看更新</button></div>}
 
       <section className="workspace-grid">
         <article className="panel calendar-panel">
@@ -1114,7 +1130,7 @@ export default function Home() {
           {data.update?.lastInstall && <p className={data.update.lastInstall.success ? "safety-note" : "update-error"}>{data.update.lastInstall.success ? `上次更新已完成：${data.update.lastInstall.version}` : `上次更新未完成：${data.update.lastInstall.error}`}</p>}
           {data.update?.releaseNotes && <div className="update-notes"><strong>更新说明</strong><p>{data.update.releaseNotes}</p></div>}
           {data.update?.status === "downloading" && <div role="status"><p>正在下载 · {data.update.percent}%</p><div className="progress-track" role="progressbar" aria-label="更新下载进度" aria-valuenow={data.update.percent} aria-valuemin={0} aria-valuemax={100}><i style={{ width: `${data.update.percent}%` }} /></div></div>}
-          {installing && <p role="status">正在安装，请稍候。完成后自动重新打开；若长时间未恢复，请从桌面启动工时助手。</p>}
+          {installing && <p role="status">{installationNotice}</p>}
           {data.update?.status === "ready" && !data.update.canInstall && <p>当前为源码运行，请使用新版安装包安装。</p>}
           {data.update?.status === "ready" && Boolean(action || installing || data.session.busy || loginInProgress) && <p>正在处理工时或登录，任务结束后才能安装。</p>}
           {updateConfirming && <p className="update-confirmation">安装将暂时关闭工时助手，完成后自动重新打开。确认现在安装？</p>}

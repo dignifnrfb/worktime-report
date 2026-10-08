@@ -53,7 +53,7 @@ async function fileDigest(file) {
 }
 
 class UpdateManager {
-  constructor({ appRoot, dataRoot, isBusy = () => false, fetchImpl = fetch, launchInstaller, checkTimeoutMs = 12_000, downloadTimeoutMs = 180_000 }) {
+  constructor({ appRoot, dataRoot, isBusy = () => false, fetchImpl = fetch, launchInstaller, checkTimeoutMs = 12_000, downloadTimeoutMs = 180_000, installTimeoutMs = 150_000 }) {
     this.appRoot = appRoot;
     this.dataRoot = dataRoot;
     this.isBusy = isBusy;
@@ -61,6 +61,7 @@ class UpdateManager {
     this.launchInstaller = launchInstaller || ((file, asset) => this.launch(file, asset));
     this.checkTimeoutMs = checkTimeoutMs;
     this.downloadTimeoutMs = downloadTimeoutMs;
+    this.installTimeoutMs = installTimeoutMs;
     this.operation = null;
     this.asset = null;
     this.downloadedFile = null;
@@ -92,22 +93,43 @@ class UpdateManager {
     try { return fs.readFileSync(path.join(this.appRoot, "worktime-app.marker"), "utf8").trim() === "MechMindWorktimeAssistant" && fs.existsSync(path.join(this.appRoot, "runtime", "node.exe")); } catch { return false; }
   }
 
-  snapshot() {
-    // An installer failure may leave this service alive. Read the helper result
-    // so a failed attempt does not permanently lock the existing installation.
-    if (this.installing() && this.installStartedAt) {
+  reconcileInstallation() {
+    // The old service may survive a helper failure or even a completed install.
+    // Read the outcome before both status reports and operation-lock checks.
+    if (["installing", "attention_required"].includes(this.state.status) && this.installStartedAt) {
       const result = this.readLastInstall();
       if (result && result.version === this.asset?.version && Date.parse(result.completedAt) >= this.installStartedAt) {
         this.lastInstall = result;
-        if (!result.success) {
+        if (result.success) {
+          let installedVersion;
+          try { installedVersion = fs.readFileSync(path.join(this.appRoot, "VERSION"), "utf8").trim(); } catch { }
+          this.state.status = installedVersion === result.version ? "restart_required" : "attention_required";
+          this.state.error = installedVersion === result.version ? null : "安装结果与本机版本不一致，请检查安装后重新打开工时助手。";
+        } else {
           this.state.error = result.requiresAttention ? "安装超时，请先检查安装进程和版本，再重新启动工时助手。" : `更新未完成：${result.error}`;
-          if (!result.requiresAttention) this.state.status = "error";
+          this.state.status = result.requiresAttention ? "attention_required" : "error";
         }
+      } else if (this.state.status === "installing" && Date.now() - this.installStartedAt >= this.installTimeoutMs) {
+        this.state.status = "attention_required";
+        this.state.error = "未收到安装完成结果，请检查安装进程和版本，确认安装程序已结束后重新打开工时助手。";
       }
     }
+  }
+
+  snapshot() {
+    this.reconcileInstallation();
     return { ...this.state, repository: this.repository, canInstall: this.installedMode(), lastInstall: this.lastInstall };
   }
-  installing() { return this.state.status === "installing"; }
+  installing() {
+    this.reconcileInstallation();
+    return ["installing", "restart_required", "attention_required"].includes(this.state.status);
+  }
+  installationMessage() {
+    this.reconcileInstallation();
+    if (this.state.status === "restart_required") return "更新已安装完成，请关闭旧窗口，从桌面重新打开工时助手。";
+    if (this.state.status === "attention_required") return this.state.error;
+    return "正在安装更新，请安装完成后再操作。";
+  }
 
   configure(repository) {
     if (this.operation || this.installing()) throw Object.assign(new Error("更新操作正在进行，请稍后修改来源。"), { statusCode: 409 });
@@ -267,10 +289,21 @@ class UpdateManager {
 
   launch(file, asset) {
     return new Promise((resolve, reject) => {
+      const helper = path.join(this.appRoot, "apply-update.ps1");
+      if (!fs.existsSync(helper)) throw new Error("安装助手文件缺失，请使用完整安装包覆盖升级。");
+      const startedAt = this.installStartedAt;
       const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", path.join(this.appRoot, "apply-update.ps1"),
         "-InstallerPath", file, "-InstallRoot", this.appRoot, "-DataRoot", this.dataRoot, "-ExpectedSha256", asset.sha256, "-ExpectedVersion", asset.version],
       { windowsHide: true, detached: true, stdio: "ignore" });
       child.once("error", reject);
+      child.once("exit", () => {
+        if (this.installStartedAt !== startedAt) return;
+        this.reconcileInstallation();
+        if (this.state.status === "installing") {
+          this.state.status = "attention_required";
+          this.state.error = "安装助手已退出，但未收到安装完成结果，请检查安装进程和版本后重新打开工时助手。";
+        }
+      });
       child.once("spawn", () => { child.unref(); resolve(); });
     });
   }

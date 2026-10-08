@@ -377,7 +377,7 @@ function buildDashboard() {
 }
 
 function runAssistant(argumentsList, timeoutMs = 180_000) {
-  if (updates.installing()) return Promise.reject(Object.assign(new Error("正在安装更新，请安装完成后再操作。"), { statusCode: 409 }));
+  if (updates.installing()) return Promise.reject(Object.assign(new Error(updates.installationMessage()), { statusCode: 409 }));
   if (activeAction) {
     const error = new Error(`正在执行“${activeAction}”，请稍后再试。`);
     error.statusCode = 409;
@@ -701,7 +701,7 @@ function encodePayload(payload) {
 }
 
 function startQrLogin(force = false) {
-  if (updates.installing()) throw Object.assign(new Error("正在安装更新，请安装完成后再登录。"), { statusCode: 409 });
+  if (updates.installing()) throw Object.assign(new Error(updates.installationMessage()), { statusCode: 409 });
   if (activeAction) {
     if (qrLoginIsRunning()) return;
     const error = new Error("当前正在处理工时，请完成后再登录或切换账户。");
@@ -784,7 +784,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "OPTIONS") return sendJson(response, 204, {});
     const url = new URL(request.url, `http://${HOST}:${localPort}`);
     if (request.method === "POST" && updates.installing()) {
-      return sendJson(response, 409, { error: "正在安装更新，请安装完成后再操作。" });
+      return sendJson(response, 409, { error: updates.installationMessage() });
     }
     if (request.method === "POST" && url.pathname === "/api/updates/check") {
       void updates.check();
