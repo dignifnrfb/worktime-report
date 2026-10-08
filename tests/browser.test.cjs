@@ -313,6 +313,101 @@ test("OA duplicate validation still stops a prepared form", async (t) => {
   await assert.rejects(assistant.prepareForm(page, { ...common.DEFAULT_CONFIG, baseUrl: "http://oa.test" }, date), /重复校验未通过/);
 });
 
+async function calendarFormPage(t, options) {
+  const validations = [];
+  const html = `<body>工时填报
+    <input id="field12648" value="测试甲"><input id="field12643" value="TEST001">
+    <div class="field12646_swapDiv"><button class="picker-icon">选择日期</button></div>
+    <input id="field12646"><input id="field12653_0"><input id="field12654_0">
+    <input id="field12655_0" oninput="document.getElementById('field12647').value = Number(this.value).toFixed(1)">
+    <input id="field12647"><input id="field13685"><textarea id="field12656_0"></textarea>
+    <div class="ant-calendar">
+      <span class="ant-calendar-year-select"></span><span class="ant-calendar-month-select"></span>
+      <button class="ant-calendar-prev-month-btn">上一月</button><button class="ant-calendar-next-month-btn">下一月</button>
+      <table><tbody id="calendar-days"></tbody></table>
+    </div>
+    <script>
+      const options = ${JSON.stringify(options)};
+      let current = new Date(options.initial + '-01T00:00:00Z');
+      window.monthMoves = 0;
+      window.WfForm = { changeFieldValue(id, field) { document.getElementById(id).value = field.value; } };
+      function render() {
+        const year = current.getUTCFullYear(), month = current.getUTCMonth() + 1;
+        document.querySelector('.ant-calendar-year-select').textContent = options.unknownMonth ? '' : year + '年';
+        document.querySelector('.ant-calendar-month-select').textContent = options.unknownMonth ? '' : options.localizedHeading ? 'Localized month' : month + '月';
+        const prefix = year + '-' + String(month).padStart(2, '0') + '-';
+        let cells = '<td class="ant-calendar-cell ant-calendar-last-month-cell">3</td>';
+        for (let day = 1; day <= new Date(Date.UTC(year, month, 0)).getUTCDate(); day++) {
+          const iso = prefix + String(day).padStart(2, '0');
+          const title = options.dayOnly || options.unknownMonth ? '' : options.chineseTitles ? year + '年' + month + '月' + day + '日' : iso;
+          cells += '<td class="ant-calendar-cell" title="' + title + '" data-date="' + iso + '">' + day + '</td>';
+        }
+        cells += '<td class="ant-calendar-cell ant-calendar-next-month-btn-day">3</td>';
+        document.getElementById('calendar-days').innerHTML = '<tr>' + cells + '</tr>';
+        document.querySelectorAll('td[data-date]').forEach(cell => cell.onclick = async () => {
+          const value = options.wrongValue || cell.dataset.date;
+          document.getElementById('field12646').value = value;
+          const response = await fetch('/api/workflow/linkage/reqFieldSqlResult', { method: 'POST', body: value });
+          const data = await response.json();
+          document.getElementById('field13685').value = data.assignInfo_90.changeValue.field13685.value;
+        });
+      }
+      function move(delta) {
+        window.monthMoves++;
+        setTimeout(() => { current.setUTCMonth(current.getUTCMonth() + delta); render(); }, 75);
+      }
+      document.querySelector('.ant-calendar-prev-month-btn').onclick = () => move(-1);
+      document.querySelector('.ant-calendar-next-month-btn').onclick = () => move(1);
+      render();
+    </script></body>`;
+  const page = await oaPage(t, (route, url) => {
+    if (url.pathname.includes("reqFieldSqlResult")) {
+      validations.push(route.request().postData());
+      return route.fulfill({ json: { assignInfo_90: { changeValue: { field13685: { value: options.duplicateCount || "0" } } } } });
+    }
+    return route.fulfill({ contentType: "text/html; charset=utf-8", body: html });
+  });
+  return { page, validations };
+}
+
+for (const scenario of [
+  { name: "current month", initial: "2026-10", target: "2026-10-03", moves: 0 },
+  { name: "previous month with the same day number", initial: "2026-10", target: "2026-09-03", moves: 1 },
+  { name: "three months earlier", initial: "2026-10", target: "2026-07-03", moves: 3 },
+  { name: "previous year", initial: "2026-01", target: "2025-12-03", moves: 1 },
+  { name: "next year", initial: "2025-12", target: "2026-01-03", moves: 1 },
+  { name: "actual initial month differs from the machine month", initial: "2026-06", target: "2026-09-03", moves: 3 },
+  { name: "day-only cells exclude adjacent months", initial: "2026-10", target: "2026-09-03", moves: 1, dayOnly: true },
+  { name: "localized headings infer month from Chinese full dates", initial: "2026-10", target: "2026-09-03", moves: 1, localizedHeading: true, chineseTitles: true },
+]) {
+  test(`OA calendar selects the full target date: ${scenario.name}`, async (t) => {
+    const { page, validations } = await calendarFormPage(t, scenario);
+    const values = await assistant.prepareForm(page, { ...common.DEFAULT_CONFIG, baseUrl: "http://oa.test" }, scenario.target);
+    assert.equal(values.date, scenario.target);
+    assert.equal(await page.evaluate(() => window.monthMoves), scenario.moves);
+    assert.deepEqual(validations, [scenario.target], "Only validate the correct date after switching months");
+  });
+}
+
+test("cross-month selection retains OA duplicate-date validation", async (t) => {
+  const { page, validations } = await calendarFormPage(t, { initial: "2026-10", duplicateCount: "1" });
+  await assert.rejects(assistant.prepareForm(page, { ...common.DEFAULT_CONFIG, baseUrl: "http://oa.test" }, "2026-09-03"), /重复校验未通过/);
+  assert.deepEqual(validations, ["2026-09-03"]);
+});
+
+test("unknown calendar month stops instead of guessing a matching day number", async (t) => {
+  const { page, validations } = await calendarFormPage(t, { initial: "2026-10", unknownMonth: true });
+  await assert.rejects(assistant.prepareForm(page, { ...common.DEFAULT_CONFIG, baseUrl: "http://oa.test" }, "2026-09-03"), /无法读取 OA 日期选择器当前年月/);
+  assert.deepEqual(validations, []);
+  assert.equal(await page.locator("#field12646").inputValue(), "");
+});
+
+test("calendar date mismatch reports target and actual date and stops", async (t) => {
+  const { page } = await calendarFormPage(t, { initial: "2026-10", wrongValue: "2026-10-03" });
+  await assert.rejects(assistant.prepareForm(page, { ...common.DEFAULT_CONFIG, baseUrl: "http://oa.test" }, "2026-09-03"), /目标 2026-09-03，实际 2026-10-03/);
+  assert.equal(await page.locator("#field12653_0").inputValue(), "");
+});
+
 async function batchFormFixture(t, options = {}) {
   const dates = ["2020-01-06", "2020-01-07", "2020-01-08"];
   const stats = { loads: 0, loading: 0, peakLoading: 0, validations: [], submissions: [] };

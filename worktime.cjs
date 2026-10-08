@@ -363,6 +363,28 @@ async function clickExactTextInAnyFrame(page, text, timeoutMs = 15_000) {
   throw new Error(`没有找到可选择的“${text}”。`);
 }
 
+async function readCalendarMonth(page) {
+  const years = page.locator(".ant-calendar-year-select").filter({ visible: true });
+  const months = page.locator(".ant-calendar-month-select").filter({ visible: true });
+  if (await years.count() && await months.count()) {
+    const year = Number((await years.first().textContent())?.match(/\d{4}/)?.[0]);
+    const month = Number((await months.first().textContent())?.match(/\d{1,2}/)?.[0]);
+    if (year && month >= 1 && month <= 12) return { year, month };
+  }
+  // Some OA themes localize the month heading. Full dates on current-month
+  // cells still identify the displayed month without using the machine clock.
+  const dates = await page.locator(
+    "td.ant-calendar-cell:not(.ant-calendar-last-month-cell):not(.ant-calendar-next-month-btn-day):not(.ant-calendar-next-month-cell)",
+  ).filter({ visible: true }).evaluateAll((cells) => cells.map((cell) => {
+    const match = cell.title.match(/^(\d{4})(?:-|年)(\d{1,2})(?:-|月)\d{1,2}(?:日)?$/);
+    return match ? `${Number(match[1])}-${Number(match[2])}` : null;
+  }).filter(Boolean));
+  const unique = [...new Set(dates)];
+  if (unique.length !== 1) return null;
+  const [year, month] = unique[0].split("-").map(Number);
+  return month >= 1 && month <= 12 ? { year, month } : null;
+}
+
 async function visibleDateCell(page, dateText) {
   const target = validateDate(dateText);
   const targetYear = target.getUTCFullYear();
@@ -374,9 +396,11 @@ async function visibleDateCell(page, dateText) {
     .locator(`td[title="${targetYear}年${targetMonth}月${targetDay}日"]`)
     .filter({ visible: true });
   if (await cnCell.count()) return cnCell.first();
+  const shown = await readCalendarMonth(page);
+  if (!shown || shown.year !== targetYear || shown.month !== targetMonth) return null;
   const dayCell = page
     .locator(
-      "td.ant-calendar-cell:not(.ant-calendar-last-month-cell):not(.ant-calendar-next-month-btn-day)",
+      "td.ant-calendar-cell:not(.ant-calendar-last-month-cell):not(.ant-calendar-next-month-btn-day):not(.ant-calendar-next-month-cell)",
     )
     .filter({ hasText: new RegExp(`^${targetDay}$`), visible: true });
   return (await dayCell.count()) ? dayCell.first() : null;
@@ -388,24 +412,25 @@ async function openCalendarMonth(page, dateText) {
   const targetMonth = target.getUTCMonth() + 1;
   if (await visibleDateCell(page, dateText)) return;
 
-  const yearSelect = page.locator(".ant-calendar-year-select").filter({ visible: true });
-  if (await yearSelect.count()) {
-    await yearSelect.first().click();
-    const yearCell = page.locator(".ant-calendar-year-panel-year").filter({
-      hasText: String(targetYear),
-      visible: true,
-    });
-    if (await yearCell.count()) await yearCell.first().click();
-  }
-  if (await visibleDateCell(page, dateText)) return;
-
-  const today = new Date();
-  const deltaMonths =
-    (targetYear - today.getFullYear()) * 12 + (targetMonth - (today.getMonth() + 1));
-  const selector = deltaMonths < 0 ? ".ant-calendar-prev-month-btn" : ".ant-calendar-next-month-btn";
-  for (let i = 0; i < Math.abs(deltaMonths); i += 1) {
+  let shown = await readCalendarMonth(page);
+  if (!shown) throw new Error("无法读取 OA 日期选择器当前年月，已停止填报。");
+  const targetIndex = targetYear * 12 + targetMonth;
+  const maxMoves = Math.abs(targetIndex - (shown.year * 12 + shown.month));
+  for (let i = 0; i < maxMoves; i += 1) {
     if (await visibleDateCell(page, dateText)) return;
+    const previousIndex = shown.year * 12 + shown.month;
+    if (previousIndex === targetIndex) return;
+    const selector = targetIndex < previousIndex ? ".ant-calendar-prev-month-btn" : ".ant-calendar-next-month-btn";
     await page.locator(selector).filter({ visible: true }).first().click();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      shown = await readCalendarMonth(page);
+      if (shown && shown.year * 12 + shown.month !== previousIndex) break;
+      await page.waitForTimeout(100);
+    }
+    if (!shown || shown.year * 12 + shown.month === previousIndex) {
+      throw new Error("OA 日期选择器月份切换未完成，请稍后重试。");
+    }
   }
 }
 
@@ -432,7 +457,10 @@ async function selectDate(page, dateText) {
     ({ selector, value }) => document.querySelector(selector)?.value === value,
     { selector: "#field12646", value: dateText },
     { timeout: 5_000 },
-  );
+  ).catch(async () => {
+    const actual = await page.locator("#field12646").inputValue().catch(() => "");
+    throw new Error(`OA 日期选择未生效：目标 ${dateText}，实际 ${actual || "未读取到日期"}。已停止填报。`);
+  });
 
   const validationResponse = await duplicateValidation;
   if (!validationResponse) {

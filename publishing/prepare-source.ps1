@@ -15,10 +15,11 @@ $files = @(
   'dashboard\postcss.config.mjs', 'dashboard\portable.vite.config.ts',
   'dashboard\portable\main.tsx', 'dashboard\portable\index.html',
   'dashboard\app\page.tsx', 'dashboard\app\globals.css', 'dashboard\public\worktime-icon.png',
-  'output\pdf\工时助手使用说明.pdf', 'release-notes\1.3.0.md',
+  'output\pdf\工时助手使用说明.pdf',
   'publishing\README.md', 'publishing\prepare-source.ps1'
 )
 $files += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'installer') -File -Recurse | ForEach-Object { $_.FullName.Substring($projectRoot.Length + 1) })
+$files += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'release-notes') -File | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.md$' } | ForEach-Object { $_.FullName.Substring($projectRoot.Length + 1) })
 $files += @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'tests') -File | Where-Object { $_.Name -match '\.test\.(cjs|ps1)$|^test-support\.cjs$' } | ForEach-Object { $_.FullName.Substring($projectRoot.Length + 1) })
 $manifest = [Collections.Generic.List[object]]::new()
 foreach ($relative in $files) {
