@@ -292,9 +292,20 @@ class UpdateManager {
       const helper = path.join(this.appRoot, "apply-update.ps1");
       if (!fs.existsSync(helper)) throw new Error("安装助手文件缺失，请使用完整安装包覆盖升级。");
       const startedAt = this.installStartedAt;
-      const child = spawn("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", path.join(this.appRoot, "apply-update.ps1"),
-        "-InstallerPath", file, "-InstallRoot", this.appRoot, "-DataRoot", this.dataRoot, "-ExpectedSha256", asset.sha256, "-ExpectedVersion", asset.version],
-      { windowsHide: true, detached: true, stdio: "ignore" });
+      // PowerShell can silently exit under DETACHED_PROCESS, while an attached
+      // child is killed with Node's Windows job when the installer stops Node.
+      // A detached cmd bootstrap gives PowerShell a normal hidden process and
+      // keeps the whole installation outside the old service's job.
+      const windowsRoot = process.env.SystemRoot || "C:\\Windows";
+      const powershell = path.join(windowsRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const literal = (value) => `'${String(value).replaceAll("'", "''")}'`;
+      const invocation = `& ${literal(helper)} -InstallerPath ${literal(file)} -InstallRoot ${literal(this.appRoot)} -DataRoot ${literal(this.dataRoot)} -ExpectedSha256 ${literal(asset.sha256)} -ExpectedVersion ${literal(asset.version)}; exit $LASTEXITCODE`;
+      // Only a fixed executable path and base64 enter cmd's command parser.
+      // Personal paths are quoted PowerShell literals inside the encoded script.
+      const encoded = Buffer.from(invocation, "utf16le").toString("base64");
+      const command = `""${powershell}" -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ${encoded}"`;
+      const child = spawn(path.join(windowsRoot, "System32", "cmd.exe"), ["/d", "/s", "/c", command],
+        { windowsHide: true, detached: true, windowsVerbatimArguments: true, stdio: "ignore" });
       child.once("error", reject);
       child.once("exit", () => {
         if (this.installStartedAt !== startedAt) return;

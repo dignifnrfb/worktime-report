@@ -16,6 +16,8 @@ Windows 本机工时工具：钉钉扫码登录公司 OA，核对已办工时，
 
 1.3.2 修复更新后长期显示“正在安装”的问题。安装已完成但旧服务仍在运行时提示重新打开；安装助手缺失、退出或未返回结果时给出对应提示。旧页面等待新服务过久时提示检查安装结果，恢复连接后自动清除。安装结果不明确时不会自动再次启动安装。
 
+1.3.3 修复自动安装助手可能直接退出、没有执行安装脚本的问题。使用独立的隐藏启动进程，确保安装助手正常运行并在旧服务关闭后继续完成安装，随后重新打开助手。1.3.0–1.3.2 如果在确认安装后无法完成升级，需先用完整安装包按原位置覆盖安装一次；旧版本的启动代码无法靠下载新包自行修复。
+
 GitHub 网络失败不影响普通填报。只安装数字正式版本，下载后核对大小及 SHA-256。安装失败不自动重试。
 
 ## 日常使用
@@ -41,11 +43,13 @@ pnpm --dir dashboard install --frozen-lockfile
 pnpm --dir dashboard run typecheck:portable
 pnpm --dir dashboard run lint:portable
 pnpm --dir dashboard run test:regression
-powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.2 -GitHubRepository 账号/仓库名
+powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.3 -GitHubRepository 账号/仓库名
 powershell -NoProfile -File tests/installer.test.ps1
 ```
 
 测试使用模拟 OA、GitHub 响应和隔离数据，不提交真实工时。覆盖更新下载、校验、忙碌时停止安装、安装助手和覆盖升级保留数据。
+
+1.3.3 另在隔离环境完成真实自动安装验证：点击确认、执行 PowerShell 和 NSIS、旧服务退出后继续安装、自动重启、原页面恢复及数据保留。安装包通过本地响应提供，网络下载另行验证；安装程序使用独立应用标识和端口。
 
 发布下一版时修改 `VERSION`，添加 `release-notes/版本.md`，更新使用说明。创建 `v版本` 标签或在 Actions 中运行发布流程。流程验证版本、运行测试、构建安装包和 `.sha256`，先上传到草稿，再发布为稳定版本。发布任务失败时检查 Actions；上传失败的草稿不会供软件检查到，不自动重新发布。
 

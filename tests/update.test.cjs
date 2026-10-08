@@ -247,6 +247,56 @@ test("a missing helper fails immediately before starting PowerShell", async (t) 
   assert.equal(f.manager.installing(), false);
 });
 
+test("the real hidden Windows helper executes and records checksum failure without starting an installer", { skip: process.platform !== "win32" }, async (t) => {
+  const f = fixture(t, { launchInstaller: undefined });
+  fs.copyFileSync(path.resolve(__dirname, "../installer/apply-update.ps1"), path.join(f.appRoot, "apply-update.ps1"));
+  await f.manager.check(); await f.manager.download();
+  f.manager.state.status = "installing";
+  f.manager.installStartedAt = Date.now();
+  // Intentionally wrong helper checksum: the simulated installer cannot run.
+  await f.manager.launch(f.manager.downloadedFile, { ...f.manager.asset, sha256: "0".repeat(64) });
+  const resultFile = path.join(f.dataRoot, "updates", "install-result.json");
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(resultFile); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(fs.existsSync(resultFile), true, "PowerShell must execute the real helper rather than silently exit before -File");
+  const result = JSON.parse(fs.readFileSync(resultFile, "utf8").replace(/^\uFEFF/, ""));
+  assert.equal(result.success, false);
+  assert.match(result.error, /checksum changed/);
+  assert.equal(result.version, f.manager.asset.version);
+  assert.equal(f.manager.snapshot().status, "error");
+  assert.equal(f.manager.installing(), false);
+});
+
+test("the real hidden helper survives its Node parent exiting and preserves literal Windows paths", { skip: process.platform !== "win32" }, async (t) => {
+  const { spawnSync } = require("node:child_process");
+  const f = fixture(t);
+  const appRoot = path.join(f.root, "app ' & % Space 中文");
+  fs.mkdirSync(appRoot);
+  fs.writeFileSync(path.join(appRoot, "VERSION"), "1.3.0");
+  fs.writeFileSync(path.join(appRoot, "apply-update.ps1"), `param([string]$InstallerPath,[string]$InstallRoot,[string]$DataRoot,[string]$ExpectedSha256,[string]$ExpectedVersion)
+Start-Sleep -Milliseconds 1200
+@{ appRoot=$InstallRoot; dataRoot=$DataRoot; file=$InstallerPath; version=$ExpectedVersion; completedAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DataRoot 'helper-survived.json') -Encoding UTF8
+`);
+  const file = path.join(f.dataRoot, "not-an-installer.exe");
+  fs.mkdirSync(f.dataRoot, { recursive: true });
+  const parent = path.join(f.root, "launch-parent.cjs");
+  fs.writeFileSync(parent, `const {UpdateManager}=require(${JSON.stringify(path.resolve(__dirname, "../worktime-update.cjs"))});
+const manager=new UpdateManager({appRoot:${JSON.stringify(appRoot)},dataRoot:${JSON.stringify(f.dataRoot)}});
+manager.launch(${JSON.stringify(file)},{version:'1.4.0',sha256:'${"0".repeat(64)}'}).then(()=>process.exit(0)).catch(error=>{console.error(error);process.exit(1);});
+`);
+  const launched = spawnSync(process.execPath, [parent], { windowsHide: true, encoding: "utf8", timeout: 15000 });
+  assert.equal(launched.status, 0, launched.stderr || launched.error?.message);
+  const exitedAt = Date.now();
+  const outcome = path.join(f.dataRoot, "helper-survived.json");
+  for (let attempt = 0; attempt < 100 && !fs.existsSync(outcome); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(fs.existsSync(outcome), true, "The helper must continue after the old Node service exits");
+  const result = JSON.parse(fs.readFileSync(outcome, "utf8").replace(/^\uFEFF/, ""));
+  assert.equal(result.appRoot, appRoot);
+  assert.equal(result.dataRoot, f.dataRoot);
+  assert.equal(result.file, file);
+  assert.equal(result.version, "1.4.0");
+  assert.ok(Date.parse(result.completedAt) >= exitedAt);
+});
+
 test("an exited helper without a result requests inspection instead of endless installation", { skip: process.platform !== "win32" }, async (t) => {
   const f = fixture(t, { launchInstaller: undefined });
   fs.writeFileSync(path.join(f.appRoot, "apply-update.ps1"), "exit 1\n");
