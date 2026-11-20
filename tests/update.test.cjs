@@ -274,7 +274,9 @@ test("the real hidden helper survives its Node parent exiting and preserves lite
   fs.writeFileSync(path.join(appRoot, "VERSION"), "1.3.0");
   fs.writeFileSync(path.join(appRoot, "apply-update.ps1"), `param([string]$InstallerPath,[string]$InstallRoot,[string]$DataRoot,[string]$ExpectedSha256,[string]$ExpectedVersion)
 Start-Sleep -Milliseconds 1200
-@{ appRoot=$InstallRoot; dataRoot=$DataRoot; file=$InstallerPath; version=$ExpectedVersion; completedAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $DataRoot 'helper-survived.json') -Encoding UTF8
+$outcome = Join-Path $DataRoot 'helper-survived.json'
+@{ appRoot=$InstallRoot; dataRoot=$DataRoot; file=$InstallerPath; version=$ExpectedVersion; completedAt=[DateTime]::UtcNow.ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath ($outcome + '.tmp') -Encoding UTF8
+Move-Item -LiteralPath ($outcome + '.tmp') -Destination $outcome
 `);
   const file = path.join(f.dataRoot, "not-an-installer.exe");
   fs.mkdirSync(f.dataRoot, { recursive: true });
