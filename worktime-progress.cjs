@@ -1,8 +1,10 @@
 "use strict";
 
+const { pendingRecordState } = require("./worktime-common.cjs");
+
 const PREFIX = "WORKTIME_PROGRESS:";
 const DAY_STATES = new Set(["loading", "checking", "submitting", "preview_passed", "skipped", "submitted_pending", "failed", "unknown"]);
-const FINISHED = new Set(["preview_passed", "skipped", "submitted_pending", "confirmed", "failed", "unknown"]);
+const FINISHED = new Set(["preview_passed", "skipped", "submitted_pending", "confirmed", "failed", "unknown", "released"]);
 
 function createBatchProgress(runId, account, mode, dates) {
   return { runId, account, mode, status: "running", total: dates.length, completed: 0, percent: 0,
@@ -48,8 +50,19 @@ function confirmProgress(batch, records) {
   if (!batch) return;
   for (const day of batch.days) {
     if (["submitted_pending", "unknown"].includes(day.status) && records.some((record) =>
-      record.workDate === day.date && !record.status.includes("同步中") && record.requestId)) day.status = "confirmed";
+      record.workDate === day.date && !pendingRecordState(record) && record.requestId)) {
+      day.status = "confirmed";
+      day.error = null;
+    }
   }
+  recalculate(batch);
+}
+
+function releasePendingDay(batch, date) {
+  const day = batch?.days.find((item) => item.date === date);
+  if (!day || !["submitted_pending", "unknown"].includes(day.status)) return;
+  day.status = "released";
+  day.error = null;
   recalculate(batch);
 }
 
@@ -57,4 +70,4 @@ function emitProgress(date, stage, error) {
   console.log(PREFIX + JSON.stringify({ runId: process.env.WORKTIME_RUN_ID || "cli", date, stage, ...(error ? { error } : {}) }));
 }
 
-module.exports = { PREFIX, createBatchProgress, applyProgress, finishProgress, confirmProgress, emitProgress };
+module.exports = { PREFIX, createBatchProgress, applyProgress, finishProgress, confirmProgress, releasePendingDay, emitProgress };

@@ -41,6 +41,34 @@ const server = http.createServer(async (request, response) => {
     const current = Number(params.get("current"));
     return send({ columns, pageSize: "3", datas: mode === "incomplete" && current === 2 ? [] : rows.slice((current - 1) * 3, current * 3) });
   }
+  if (mode === "submit-no-request" && url.pathname === "/spa/workflow/static4form/index.html") {
+    response.setHeader("Content-Type", "text/html; charset=utf-8");
+    return response.end(`<body>工时填报
+      <input id="field12648" value="${account.name}"><input id="field12643" value="${account.employeeNo}">
+      <div class="field12646_swapDiv"><button class="picker-icon">选择日期</button></div>
+      <input id="field12646"><input id="field12653_0"><input id="field12654_0">
+      <input id="field12655_0" oninput="document.getElementById('field12647').value = Number(this.value).toFixed(1)">
+      <input id="field12647"><input id="field13685"><textarea id="field12656_0"></textarea>
+      <table><tr><td title="2020-01-20">20</td><td title="2020-01-21">21</td></tr></table>
+      <button title="提交">提交</button>
+      <script>
+        window.WfForm = {
+          getFieldCurViewAttr() { return 2; },
+          getFieldValue(id) { return document.getElementById(id).value; },
+          changeFieldValue(id, field) { document.getElementById(id).value = field.value; },
+        };
+        for (const cell of document.querySelectorAll('td')) cell.onclick = async () => {
+          document.getElementById('field12646').value = cell.title;
+          await fetch('/api/workflow/linkage/reqFieldSqlResult', {method:'POST', body:cell.title});
+          document.getElementById('field13685').value = '0';
+        };
+        document.querySelector('[title="提交"]').onclick = () => fetch('/test/submit-clicked');
+      </script></body>`);
+  }
+  if (mode === "submit-no-request" && url.pathname === "/api/workflow/linkage/reqFieldSqlResult") {
+    return send({ assignInfo_90: { changeValue: { field13685: { value: "0" } } } });
+  }
+  if (mode === "submit-no-request" && url.pathname === "/test/submit-clicked") return send({});
   if (url.pathname === "/api/public/browser/data/161") {
     const current = Number(params.get("current"));
     const query = String(params.get("q") || "");
@@ -159,10 +187,10 @@ test("completed-workflow parsing filters other workflow types and rejects malfor
   assert.equal(parseDoneRows([{ ...rows[0], operatedateNewspan: " " }], columns, 197)[0].operationTime, "");
 });
 
-async function cli(command) {
+async function cli(command, ...args) {
   writeJson(path.join(directory, "worktime.config.json"), { ...defaults, baseUrl, workflowId: 197, account: { ...account, oaUserId: "123" } });
   writeJson(path.join(directory, "storage-state.json"), { cookies: [], origins: [] });
-  const child = spawn(process.execPath, [path.join(ROOT, "worktime.cjs"), command], {
+  const child = spawn(process.execPath, [path.join(ROOT, "worktime.cjs"), command, ...args], {
     env: { ...process.env, WORKTIME_DATA_ROOT: directory }, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
@@ -183,6 +211,66 @@ test("the actual CLI uses the fast path and preserves previous data on partial f
   const partial = await cli("list");
   assert.equal(partial.code, 1);
   assert.equal(fs.readFileSync(csv, "utf8"), saved);
+});
+
+test("pending review keeps old markers when OA cannot be verified and reconciles only the selected date", async () => {
+  const csv = path.join(directory, "已办工时.csv");
+  const time = "2020-02-01 08:00:00";
+  const pending = ["2020-01-09", "2020-01-20", "2020-01-21"]
+    .map((date) => `"${date}","","","${time}","已提交·同步中","待核对"`).join("\r\n");
+  const original = `\uFEFF"工时日期","单据编号","请求ID","操作时间","状态","流程标题"\r\n${pending}\r\n`;
+  const run = (date, operationTime = time) => cli("resolve-pending", `--payload=${Buffer.from(JSON.stringify({
+    date, operationTime, confirm: true, account: { ...account, oaUserId: "123" },
+  })).toString("base64url")}`);
+  fs.writeFileSync(csv, original);
+  for (const scenario of ["expired", "mismatch", "incomplete"]) {
+    mode = scenario;
+    assert.equal((await run("2020-01-20")).code, 1);
+    assert.equal(fs.readFileSync(csv, "utf8"), original);
+  }
+  mode = "valid";
+  assert.equal((await run("2020-01-20", "stale")).code, 1);
+  assert.equal(fs.readFileSync(csv, "utf8"), original);
+  const found = await run("2020-01-09");
+  assert.equal(found.code, 0, found.output);
+  assert.match(found.output, /"resolution":"confirmed"/);
+  const updated = fs.readFileSync(csv, "utf8");
+  assert.match(updated, /"2020-01-09","GSTB-9","9"/);
+  assert.match(updated, /"2020-01-20","","","2020-02-01 08:00:00","已提交·同步中"/);
+  const absent = await run("2020-01-20");
+  assert.equal(absent.code, 0, absent.output);
+  assert.match(absent.output, /"resolution":"released"/);
+  const released = fs.readFileSync(csv, "utf8");
+  assert.doesNotMatch(released, /"2020-01-20",""/);
+  assert.match(released, /"2020-01-21","","","2020-02-01 08:00:00","已提交·同步中"/);
+  assert.match(released, /"2020-01-09","GSTB-9","9"/);
+});
+
+test("a real batch command persists an unresolved date, stops the rest, and does not retry it", async () => {
+  mode = "submit-no-request";
+  requests = [];
+  const dates = ["2020-01-20", "2020-01-21"];
+  const owner = { ...account, oaUserId: "123" };
+  const leave = { name: "休假", code: "004" };
+  const csv = path.join(directory, "已办工时.csv");
+  fs.writeFileSync(csv, '"工时日期","单据编号","请求ID","操作时间","状态","流程标题"\r\n');
+  writeJson(path.join(directory, "work-types.json"), { account: owner, sourceTotal: 1, workTypes: [leave] });
+  const submit = (selected) => cli("batch-submit", "--yes", `--payload=${Buffer.from(JSON.stringify({
+    dates: selected, account: owner, fast: true, settings: { workType: leave },
+  })).toString("base64url")}`);
+  const result = await submit(dates);
+  assert.equal(result.code, 1, result.output);
+  assert.match(result.output, /未检测到 OA 提交请求/);
+  assert.match(result.output, /"submittedDates":\[\],"unconfirmedDates":\["2020-01-20"\]/);
+  const persisted = fs.readFileSync(csv, "utf8");
+  assert.match(persisted, /"2020-01-20","","","[^"]+","结果待核对"/);
+  assert.doesNotMatch(persisted, /2020-01-21/);
+  assert.equal(requests.filter((item) => item.path === "/test/submit-clicked").length, 1);
+  assert.equal(requests.filter((item) => item.path.endsWith("reqFieldSqlResult")).length, 1);
+  const repeat = await submit(dates.slice(0, 1));
+  assert.equal(repeat.code, 0, repeat.output);
+  assert.match(repeat.output, /"skippedDates":\["2020-01-20"\]/);
+  assert.equal(requests.filter((item) => item.path === "/test/submit-clicked").length, 1);
 });
 
 test("startup check records expiry and network failures without discarding saved credentials", async () => {

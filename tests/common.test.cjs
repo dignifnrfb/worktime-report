@@ -76,10 +76,14 @@ test("OA user IDs isolate same-name accounts without employee numbers", (t) => {
 
 test("pending submissions remain visible until OA returns the completed record", () => {
   const pending = { workDate: "2020-01-01", status: "已提交·同步中" };
+  const unknown = { workDate: "2020-01-03", status: common.SUBMIT_UNKNOWN };
+  const acknowledged = { workDate: "2020-01-04", status: common.SUBMIT_PENDING };
   const old = { workDate: "2020-01-02", status: "归档" };
-  assert.deepEqual(common.mergePendingRecords([], [pending, old]), [pending]);
+  assert.equal(common.pendingRecordState(pending), "unknown");
+  assert.equal(common.pendingRecordState({ ...pending, requestId: "42" }), "submitted_pending");
+  assert.deepEqual(common.mergePendingRecords([], [pending, unknown, acknowledged, old]), [pending, unknown, acknowledged]);
   const complete = { ...pending, status: "归档", requestId: "123" };
-  assert.deepEqual(common.mergePendingRecords([complete], [pending]), [complete]);
+  assert.deepEqual(common.mergePendingRecords([complete], [pending, unknown]), [complete, unknown]);
 });
 
 test("dates are validated, deduplicated, and future dates rejected", () => {

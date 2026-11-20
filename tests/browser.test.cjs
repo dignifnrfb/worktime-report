@@ -540,7 +540,7 @@ test("a duplicate discovered on the preloaded day preserves the earlier submissi
   assert.equal(page.context().pages().length, 2);
 });
 
-test("submit clicks OA confirms and does not wait for a success page", async (t) => {
+test("submit clicks OA confirms and accepts an explicit response without a success page", async (t) => {
   let submitted = 0;
   const html = `<body>工时填报
     <button title="提交">提交</button>
@@ -566,7 +566,55 @@ test("submit clicks OA confirms and does not wait for a success page", async (t)
   assert.ok(Date.now() - started < 4_000, "submit must not wait for OA's success page");
   assert.equal(submitted, 1);
   assert.ok(result.url);
+  assert.equal(result.receipt, "response");
   assert.doesNotMatch(await page.locator("body").innerText(), /提交成功|操作成功/);
+});
+
+test("clicking a submit button without an OA request cannot produce a successful submission", async (t) => {
+  const page = await oaPage(t, (route) => route.fulfill({
+    contentType: "text/html; charset=utf-8",
+    body: '<button title="提交">提交</button>',
+  }));
+  await page.goto("http://oa.test/new-form");
+  await assert.rejects(assistant.submitPreparedForm(page, { receiptTimeoutMs: 250 }), {
+    message: /未检测到 OA 提交请求/,
+    submitEvidence: { requestSeen: false, httpStatus: null },
+  });
+  for (const event of ["request", "response", "requestfailed", "dialog"]) assert.equal(page.listenerCount(event), 0);
+});
+
+test("a rejected or unacknowledged submission waits for evidence and stops", async (t) => {
+  for (const scenario of [
+    { response: { json: { success: false, ok: true } }, message: /回执显示提交未成功/ },
+    { response: { status: 503, body: "service unavailable" }, message: /HTTP 503/ },
+    { response: { json: { message: "unrecognized" } }, message: /未收到 OA 的成功回执/ },
+  ]) {
+    const page = await oaPage(t, (route, url) => url.pathname === "/RequestOperation"
+      ? route.fulfill(scenario.response)
+      : route.fulfill({
+        contentType: "text/html; charset=utf-8",
+        body: `<button title="提交" onclick="fetch('/RequestOperation', { method: 'POST' })">提交</button>`,
+      }));
+    await page.goto("http://oa.test/new-form");
+    await assert.rejects(assistant.submitPreparedForm(page, { receiptTimeoutMs: 700 }), {
+      message: scenario.message,
+      submitEvidence: { requestSeen: true, httpStatus: scenario.response.status || 200 },
+    });
+  }
+});
+
+test("submit can pick up a delayed OA success page after an unrecognized response", async (t) => {
+  const page = await oaPage(t, (route, url) => url.pathname === "/RequestOperation"
+    ? route.fulfill({ json: { message: "unrecognized" } })
+    : route.fulfill({
+      contentType: "text/html; charset=utf-8",
+      body: `<button title="提交" onclick="fetch('/RequestOperation', { method: 'POST' }).then(() =>
+        setTimeout(() => document.body.append('提交成功'), 400))">提交</button>`,
+    }));
+  await page.goto("http://oa.test/new-form");
+  const result = await assistant.submitPreparedForm(page, { receiptTimeoutMs: 3_000 });
+  assert.equal(result.receipt, "page");
+  assert.match(result.text, /提交成功/);
 });
 
 test("a changed OA form account stops before filling any date or changing local ownership", async (t) => {
@@ -629,6 +677,14 @@ async function uiPage(t, state) {
         return route.fulfill({ json: { message: "所选日期已经填报。", dashboard: state.dashboard, result: { submittedDates: [], skippedDates: body.dates } } });
       }
       if (url.pathname === "/api/preview") return route.fulfill({ json: { message: "预演通过", dashboard: state.dashboard } });
+      if (url.pathname === "/api/pending/resolve") {
+        assert.equal(body.confirm, true);
+        assert.deepEqual(body.account, state.dashboard.account);
+        const record = state.dashboard.records.find((item) => item.workDate === body.date);
+        assert.equal(body.operationTime, record.operationTime);
+        state.dashboard.records = state.dashboard.records.filter((item) => item !== record);
+        return route.fulfill({ json: { message: "已解除本地待核对标记", dashboard: state.dashboard } });
+      }
       if (url.pathname === "/api/defaults") {
         state.dashboard.defaults = { ...state.dashboard.defaults, ...body.settings };
         return route.fulfill({ json: { message: "默认值已保存", dashboard: state.dashboard } });
@@ -699,6 +755,27 @@ test("statistics count distinct workdays and changing accounts resets selected d
   assert.match(await page.locator(".stat-card.featured .stat-value").innerText(), /^0\s*\//);
 });
 
+test("an old unresolved date is not counted as filled and can be selected only after reviewed release", async (t) => {
+  const record = { workDate: "2026-09-02", requestId: "", documentNo: "", operationTime: "2026-09-04 05:33:58", status: "已提交·同步中", pendingStatus: "unknown", title: "待核对测试" };
+  const state = { dashboard: structuredClone(dashboard({ records: [record] })) };
+  const page = await uiPage(t, state);
+  assert.match(await page.locator(".stat-card.featured .stat-value").innerText(), /^0\s*\//);
+  await page.getByRole("button", { name: "2026-09-02 待核对", exact: true }).click();
+  await page.getByText("提交结果待核对", { exact: true }).waitFor();
+  assert.equal(await page.getByText("这一天已经填过", { exact: true }).count(), 0);
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "已在 OA 核对", exact: true }).click();
+  assert.equal(state.requests.filter((item) => item.pathname === "/api/pending/resolve").length, 0);
+  page.once("dialog", async (dialog) => {
+    assert.match(dialog.message(), /2026-09-02/);
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "已在 OA 核对", exact: true }).click();
+  await page.getByRole("button", { name: "2026-09-02 待补", exact: true }).click();
+  await page.getByRole("heading", { name: "已选 1 天", exact: true }).waitFor();
+  assert.equal(state.requests.filter((item) => item.pathname === "/api/submit").length, 0);
+});
+
 test("login failure replaces the spinner with a retry action", async (t) => {
   const state = { dashboard: structuredClone(dashboard()), loginStatus: { state: "checking", message: "准备二维码" } };
   state.dashboard.session.connected = false;
@@ -767,7 +844,7 @@ test("submission toast reports initiated counts awaiting confirmation rather tha
   await page.getByRole("button", { name: /^2026-09-03/ }).click();
   await page.getByRole("button", { name: "提交 2 天", exact: true }).click();
   await page.getByRole("button", { name: "确认提交 2 天", exact: true }).click();
-  await page.getByRole("status").filter({ hasText: "已发起 0 天，待 OA 确认；跳过已填 2 天" }).waitFor();
+  await page.getByRole("status").filter({ hasText: "收到 0 天的 OA 回执，待同步单据；跳过已有记录 2 天" }).waitFor();
 });
 
 test("submission confirmation closes while a batch runs so live progress remains visible", async (t) => {
@@ -785,7 +862,7 @@ test("submission confirmation closes while a batch runs so live progress remains
   await page.getByRole("article", { name: "批量处理进度" }).getByRole("heading", { name: "正在处理第 1／1 天" }).waitFor();
   assert.equal(await page.getByRole("dialog").count(), 0);
   state.releaseSubmit();
-  await page.getByRole("status").filter({ hasText: "已发起 0 天" }).waitFor();
+  await page.getByRole("status").filter({ hasText: "收到 0 天的 OA 回执" }).waitFor();
 });
 
 test("the same OA user losing employee number during polling keeps the form and remembered work project", async (t) => {

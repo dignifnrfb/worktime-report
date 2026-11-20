@@ -154,10 +154,22 @@ function isWorkday(date, config) {
   return config.skipWeekends === false || (day !== 0 && day !== 6);
 }
 
+const SUBMIT_PENDING = "已发起·待确认";
+const SUBMIT_UNKNOWN = "结果待核对";
+
+function pendingRecordState(record) {
+  if (record.status === SUBMIT_UNKNOWN) return "unknown";
+  if (record.status === SUBMIT_PENDING) return "submitted_pending";
+  if (record.status === "已提交·同步中") {
+    return record.documentNo || record.requestId ? "submitted_pending" : "unknown";
+  }
+  return null;
+}
+
 function mergePendingRecords(records, previous) {
   const dates = new Set(records.map((record) => record.workDate));
   return [...records, ...previous.filter((record) =>
-    record.status === "已提交·同步中" && !dates.has(record.workDate))];
+    pendingRecordState(record) && !dates.has(record.workDate))];
 }
 
 function looksLikeProjectCode(value) {
@@ -210,6 +222,7 @@ module.exports = {
   PROFILE_ROOT, STATE_PATH, LOGIN_STATUS_PATH, LOGIN_QR_PATH, LOG_ROOT, DEFAULT_CONFIG,
   normalizeBaseUrl, loadConfig, writeTextAtomic, writeJsonAtomic, writeLoginStatus,
   accountKey, accountsMatch, syncAccount, todayIso, isWorkday, mergePendingRecords,
+  SUBMIT_PENDING, SUBMIT_UNKNOWN, pendingRecordState,
   looksLikeProjectCode, canonicalProject, normalizeProjects, normalizeProjectKey, projectKeysMatch,
   isLeaveWorkType, withoutLeaveProject,
 };

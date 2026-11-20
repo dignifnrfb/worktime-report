@@ -8,6 +8,7 @@ type WorktimeRecord = {
   requestId: string;
   operationTime: string;
   status: string;
+  pendingStatus?: "unknown" | "submitted_pending" | null;
   title: string;
 };
 
@@ -368,7 +369,7 @@ const batchStageLabels: Record<string, string> = {
   starting: "准备处理", waiting: "等待处理", loading: "加载表单", checking: "核对字段",
   submitting: "发起提交", preview_passed: "预演通过", skipped: "跳过",
   submitted_pending: "已发起·待确认", confirmed: "OA 已确认", failed: "失败",
-  unknown: "结果待核对", unprocessed: "未处理", finished: "处理结束", stopped: "处理已停止",
+  unknown: "结果待核对", released: "已解除本地标记", unprocessed: "未处理", finished: "处理结束", stopped: "处理已停止",
 };
 
 function BatchProgressPanel({ batch }: { batch: BatchProgress }) {
@@ -381,7 +382,7 @@ function BatchProgressPanel({ batch }: { batch: BatchProgress }) {
       </div><b>{batch.percent}%</b></div>
       <div className="batch-progress-track" role="progressbar" aria-label="已处理日期比例" aria-valuemin={0} aria-valuemax={100} aria-valuenow={batch.percent}><i style={{ width: `${batch.percent}%` }} /></div>
       <p className="batch-progress-meta" role="status">已处理 {batch.completed}／{batch.total} 天{active && batch.currentDate ? ` · ${batch.currentDate} · ${batchStageLabels[batch.stage] || batch.stage}` : ""}</p>
-      <p className="batch-progress-note">进度表示日期处理情况；“已发起·待确认”需同步已办后核对。</p>
+      <p className="batch-progress-note">进度表示日期处理情况；有待确认或待核对的日期时，请先同步已办并查看 OA 单据。</p>
       {batch.error && <p className="batch-progress-error" role="alert">{batch.error}</p>}
       <ol className="batch-progress-days">{batch.days.map((day) => <li key={day.date} className={`batch-day-${day.status}`}>
         <time>{day.date}</time><span>{batchStageLabels[day.status] || day.status}</span>{day.error && <small>{day.error}</small>}
@@ -588,6 +589,9 @@ export default function Home() {
     () => new Map((data?.records || []).map((record) => [record.workDate, record])),
     [data?.records],
   );
+  const confirmedDates = useMemo(() => new Set(
+    (data?.records || []).filter((record) => !record.pendingStatus).map((record) => record.workDate),
+  ), [data?.records]);
   const calendarDays = useMemo(
     () => (selectedMonth ? getCalendarDays(selectedMonth) : []),
     [selectedMonth],
@@ -596,15 +600,16 @@ export default function Home() {
     () => (data?.records || []).filter((record) => record.workDate.startsWith(selectedMonth)),
     [data?.records, selectedMonth],
   );
+  const selectedMonthPending = selectedMonthRecords.filter((record) => record.pendingStatus).length;
   const missingDates = useMemo(() => {
     if (!data || !selectedMonth || selectedMonth > thisMonth) return [];
     const through = selectedMonth === thisMonth ? today : undefined;
     return monthWorkdays(selectedMonth, data, through).filter((date) => !recordsByDate.has(date));
   }, [data, recordsByDate, selectedMonth, thisMonth, today]);
 
-  const thisMonthFilled = data ? monthWorkdays(thisMonth, data, today).filter((date) => recordsByDate.has(date)).length : 0;
-  const previousMonthFilled = data ? monthWorkdays(previousMonth, data).filter((date) => recordsByDate.has(date)).length : 0;
-  const selectedMonthFilled = data && selectedMonth ? monthWorkdays(selectedMonth, data).filter((date) => recordsByDate.has(date)).length : 0;
+  const thisMonthFilled = data ? monthWorkdays(thisMonth, data, today).filter((date) => confirmedDates.has(date)).length : 0;
+  const previousMonthFilled = data ? monthWorkdays(previousMonth, data).filter((date) => confirmedDates.has(date)).length : 0;
+  const selectedMonthFilled = data && selectedMonth ? monthWorkdays(selectedMonth, data).filter((date) => confirmedDates.has(date)).length : 0;
   const thisMonthElapsed = data ? monthWorkdays(thisMonth, data, today).length : 0;
   const previousMonthTotal = data ? monthWorkdays(previousMonth, data).length : 0;
   const selectedMonthTotal = data && selectedMonth ? monthWorkdays(selectedMonth, data).length : 0;
@@ -866,7 +871,7 @@ export default function Home() {
       });
       applyDashboard(result.dashboard);
       const summary = kind === "submit" && result.result
-        ? `已发起 ${result.result.submittedDates.length} 天，待 OA 确认${result.result.skippedDates.length ? `；跳过已填 ${result.result.skippedDates.length} 天` : ""}，页面已更新。`
+        ? `收到 ${result.result.submittedDates.length} 天的 OA 回执，待同步单据${result.result.skippedDates.length ? `；跳过已有记录 ${result.result.skippedDates.length} 天` : ""}。`
         : result.message.split("\n").at(-1) || "操作完成";
       setToast(summary);
       if (kind === "submit") {
@@ -880,6 +885,30 @@ export default function Home() {
         : message);
       if (/登录|扫码/.test(message)) void startLogin(false);
       setConfirming(false);
+      await loadDashboard(false);
+    } finally {
+      setAction(null);
+    }
+  }
+
+  async function resolvePending(record: WorktimeRecord) {
+    if (!data?.session.connected || data.session.busy || action || installing || serviceOffline) return;
+    const confirmed = window.confirm(
+      `请先在 OA 的全部流程和草稿中核对工时日期 ${record.workDate}。\n\n` +
+      "继续后，助手会重新同步 OA 已办。查到单据就更新状态，查不到则解除这一天的本地标记。请确认已完成核对。",
+    );
+    if (!confirmed) return;
+    setAction("pending");
+    setError(null);
+    try {
+      const result = await api<{ message: string; dashboard: DashboardData }>("/api/pending/resolve", {
+        method: "POST",
+        body: JSON.stringify({ date: record.workDate, operationTime: record.operationTime, account: data.account, confirm: true }),
+      });
+      applyDashboard(result.dashboard);
+      setToast(result.message);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "暂时无法核对单据，请稍后再试。");
       await loadDashboard(false);
     } finally {
       setAction(null);
@@ -1018,7 +1047,7 @@ export default function Home() {
               </div>
             </div>
           </div>
-          <div className="calendar-legend"><span><i className="legend-dot filled-dot" />已填</span><span><i className="legend-dot missing-dot" />待补</span><span><i className="legend-dot selected-dot" />已选</span><span><i className="legend-dot weekend-dot" />休息</span></div>
+          <div className="calendar-legend"><span><i className="legend-dot filled-dot" />已填</span><span><i className="legend-dot missing-dot" />待补</span><span><i className="legend-dot pending-dot" />待核对</span><span><i className="legend-dot selected-dot" />已选</span><span><i className="legend-dot weekend-dot" />休息</span></div>
           <div className="calendar-grid weekdays-row">{weekdays.map((day, index) => <div className={index > 4 ? "weekend-label" : ""} key={day}>周{day}</div>)}</div>
           <div className="calendar-grid day-grid">
             {calendarDays.map(({ date, iso, inMonth }) => {
@@ -1027,7 +1056,8 @@ export default function Home() {
               const override = data.workdayOverrides?.[iso];
               const missing = inMonth && !rest && iso <= today && !record;
               const selected = calendarEditing ? adjustmentDates.includes(iso) : selectedSet.has(iso);
-              const className = ["day-cell", !inMonth ? "outside" : "", rest ? "weekend" : "", record ? "filled" : "", missing ? "missing" : "", selected ? "selected" : ""].filter(Boolean).join(" ");
+              const recordLabel = record?.pendingStatus ? "待核对" : "已填";
+              const className = ["day-cell", !inMonth ? "outside" : "", rest ? "weekend" : "", record ? record.pendingStatus ? "pending" : "filled" : "", missing ? "missing" : "", selected ? "selected" : ""].filter(Boolean).join(" ");
               return (
                 <button
                   key={iso}
@@ -1037,12 +1067,12 @@ export default function Home() {
                     ? setAdjustmentDates((current) => current.includes(iso) ? current.filter((date) => date !== iso) : [...current, iso].sort())
                     : record ? (setInspectedDate(iso), setSelectedDates([])) : missing && toggleDate(iso)}
                   aria-pressed={selected}
-                  aria-label={`${iso}${calendarEditing ? ` ${rest ? "休息" : "上班"}${selected ? " 已选择" : ""}` : record ? " 已填" : rest ? " 休息" : missing ? selected ? " 已选择" : " 待补" : ""}`}
+                  aria-label={`${iso}${calendarEditing ? ` ${rest ? "休息" : "上班"}${selected ? " 已选择" : ""}` : record ? ` ${recordLabel}` : rest ? " 休息" : missing ? selected ? " 已选择" : " 待补" : ""}`}
                 >
                   <span className="day-number">{date.getDate()}</span>
                   {override && inMonth && <span className="override-marker" title={override === "work" ? "手动设为上班" : "手动设为休息"}>{override === "work" ? "班" : "休"}</span>}
                   {rest && inMonth && !record && <span className="day-state">{selected ? "✓ 已选" : "休"}</span>}
-                  {record && <span className="day-state">{record.status.includes("同步中") ? "待确认" : "已填"}</span>}
+                  {record && <span className="day-state">{recordLabel}</span>}
                   {missing && <span className="day-state">{selected ? "✓ 已选" : "待补"}</span>}
                   {calendarEditing && selected && !rest && !record && !missing && <span className="day-state">✓ 已选</span>}
                   {iso === today && <span className="today-marker">今天</span>}
@@ -1086,20 +1116,30 @@ export default function Home() {
                   <button className="secondary-button full" onClick={() => void runAction("preview")} disabled={Boolean(action || installing || data.session.busy || serviceOffline || !data.session.connected)}>{action === "preview" ? `正在预演 ${selectedDates.length} 天…` : `预演 ${selectedDates.length} 天`}</button>
                   <button className="primary-button full" onClick={() => { const validation = validateForm(); if (validation) setError(validation); else setConfirming(true); }} disabled={Boolean(action || installing || data.session.busy || serviceOffline || !data.session.connected)}>提交 {selectedDates.length} 天</button>
                 </div>
-                <p className="safety-note">只启动一次填报会话；已发起的日期会标为待确认，请同步已办核对。</p>
+                <p className="safety-note">收到 OA 回执后检查已办。提交结果不明确时会停在当天。</p>
               </>
             ) : inspectedRecord ? (
-              <div className="completed-state"><span className="complete-check">✓</span><strong>这一天已经填过</strong><p>{inspectedRecord.documentNo || inspectedRecord.requestId || inspectedRecord.workDate}</p><small>{inspectedRecord.status.includes("同步中") ? "已发起·待确认" : inspectedRecord.status || "已办"}</small></div>
+              inspectedRecord.pendingStatus ? (
+                <div className="completed-state pending-state">
+                  <strong>{inspectedRecord.pendingStatus === "unknown" ? "提交结果待核对" : "已收到回执，等待核对单据"}</strong>
+                  <p>{inspectedRecord.documentNo || inspectedRecord.requestId || inspectedRecord.workDate}</p>
+                  <small>请在 OA 的全部流程和草稿中核对这一天。</small>
+                  <button className="secondary-button" disabled={Boolean(action || installing || data.session.busy || serviceOffline || !data.session.connected)} onClick={() => void resolvePending(inspectedRecord)}>{action === "pending" ? "正在核对 OA…" : "已在 OA 核对"}</button>
+                </div>
+              ) : (
+                <div className="completed-state"><span className="complete-check">✓</span><strong>这一天已经填过</strong><p>{inspectedRecord.documentNo || inspectedRecord.requestId || inspectedRecord.workDate}</p><small>{inspectedRecord.status || "已办"}</small></div>
+              )
             ) : (
               <div className="empty-state"><span>↖</span><p>点击一个或多个“待补”日期，或使用“全选待补”。</p></div>
             )}
           </article>
 
           <article className="panel missing-panel">
-            <div className="panel-header compact"><div><p className="section-kicker">缺失清单</p><h3>{missingDates.length ? `${missingDates.length} 个工作日` : selectedMonth > thisMonth ? "尚未到填报日期" : "本月已齐"}</h3></div><button className="count-badge selectable" onClick={toggleAllMissing} disabled={!missingDates.length || Boolean(action || installing)}>{selectedDates.length}/{missingDates.length}</button></div>
+            <div className="panel-header compact"><div><p className="section-kicker">缺失清单</p><h3>{missingDates.length ? `${missingDates.length} 个工作日` : selectedMonth > thisMonth ? "尚未到填报日期" : selectedMonthPending ? "有日期待核对" : "本月已齐"}</h3></div><button className="count-badge selectable" onClick={toggleAllMissing} disabled={!missingDates.length || Boolean(action || installing)}>{selectedDates.length}/{missingDates.length}</button></div>
             <div className="missing-list">
               {missingDates.slice(0, 8).map((date) => <button key={date} className={selectedSet.has(date) ? "active" : ""} onClick={() => toggleDate(date)}><i className="check-box">{selectedSet.has(date) ? "✓" : ""}</i><span>{shortDate(date)}</span><small>{new Intl.DateTimeFormat("zh-CN", { weekday: "short" }).format(new Date(`${date}T00:00:00`))}</small></button>)}
-              {!missingDates.length && <div className="all-done"><span>✓</span><p>没有发现缺报工作日</p></div>}
+              {selectedMonthPending > 0 && <p className="more-missing">{selectedMonthPending} 天待核对，点选日历中的对应日期查看。</p>}
+              {!missingDates.length && !selectedMonthPending && <div className="all-done"><span>✓</span><p>没有发现缺报工作日</p></div>}
               {missingDates.length > 8 && <p className="more-missing">另有 {missingDates.length - 8} 天，可点击上方“全选待补”</p>}
             </div>
           </article>
@@ -1108,10 +1148,10 @@ export default function Home() {
       </section>
 
       <section className="panel records-panel">
-        <div className="panel-header"><div><p className="section-kicker">已填信息</p><h2>{monthLabel(selectedMonth)} · {selectedMonthRecords.length} 条</h2></div><button className="text-button" onClick={() => changeMonth(previousMonth)}>查看上月 →</button></div>
+        <div className="panel-header"><div><p className="section-kicker">工时记录</p><h2>{monthLabel(selectedMonth)} · {selectedMonthRecords.length} 条</h2></div><button className="text-button" onClick={() => changeMonth(previousMonth)}>查看上月 →</button></div>
         <div className="records-table" role="table" aria-label="已填工时">
           <div className="records-row records-head" role="row"><span>工时日期</span><span>单据编号</span><span>提交时间</span><span>状态</span></div>
-          {selectedMonthRecords.map((record) => <button className="records-row" role="row" disabled={Boolean(action || installing)} key={record.requestId || record.workDate} onClick={() => { setInspectedDate(record.workDate); setSelectedDates([]); }}><span className="record-date"><i />{record.workDate}</span><span className="mono">{record.documentNo || "等待同步"}</span><span>{record.operationTime || "—"}</span><span><b className={`status-badge ${record.status.includes("同步中") ? "syncing" : ""}`}>{record.status.includes("同步中") ? "已发起·待确认" : record.status || "已办"}</b></span></button>)}
+          {selectedMonthRecords.map((record) => <button className="records-row" role="row" disabled={Boolean(action || installing)} key={record.requestId || record.workDate} onClick={() => { setInspectedDate(record.workDate); setSelectedDates([]); }}><span className="record-date"><i />{record.workDate}</span><span className="mono">{record.documentNo || "—"}</span><span>{record.operationTime || "—"}</span><span><b className={`status-badge ${record.pendingStatus ? "syncing" : ""}`}>{record.pendingStatus ? batchStageLabels[record.pendingStatus] : record.status || "已办"}</b></span></button>)}
           {!selectedMonthRecords.length && <div className="no-records">这个月还没有已填记录</div>}
         </div>
       </section>

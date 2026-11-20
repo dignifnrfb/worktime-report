@@ -13,6 +13,7 @@ const {
   DATA_ROOT, CONFIG_PATH, EXPORT_PATH: CSV_PATH, PROJECTS_PATH, WORK_TYPES_PATH,
   STATE_PATH, LOGIN_STATUS_PATH, LOGIN_QR_PATH, LOG_ROOT, loadConfig: readConfig,
   writeJsonAtomic, writeLoginStatus, accountsMatch, accountKey, todayIso,
+  pendingRecordState,
   canonicalProject, normalizeProjects,
   isLeaveWorkType, withoutLeaveProject,
 } = require("./worktime-common.cjs");
@@ -103,6 +104,7 @@ function readRecords() {
       title: row["流程标题"] || "",
     }))
     .filter((record) => record.workDate)
+    .map((record) => ({ ...record, pendingStatus: pendingRecordState(record) }))
     .sort((left, right) => right.workDate.localeCompare(left.workDate));
 }
 
@@ -471,7 +473,7 @@ function runAssistant(argumentsList, timeoutMs = 180_000) {
       const extra = {
         command, exitCode: code,
         submittedDates: result?.submittedDates, skippedDates: result?.skippedDates,
-        processedDates: result?.processedDates,
+        processedDates: result?.processedDates, unconfirmedDates: result?.unconfirmedDates,
       };
       if (code === 0) {
         if (!timedOut) {
@@ -920,6 +922,33 @@ const server = http.createServer(async (request, response) => {
       const result = await runAssistant(["batch-preview", `--payload=${encodePayload(payload)}`], 60_000 + payload.dates.length * 90_000);
       return sendJson(response, 200, { ok: true, ...result, dashboard: buildDashboard() });
     }
+    if (request.method === "POST" && url.pathname === "/api/pending/resolve") {
+      const body = await readBody(request);
+      if (body.confirm !== true || !validDate(body.date) || body.date > todayIso() ||
+          typeof body.operationTime !== "string") {
+        return sendJson(response, 400, { error: "请确认已在 OA 核对该日期。" });
+      }
+      const config = readConfig();
+      if (!body.account || !accountsMatch(config.account, body.account)) {
+        return sendJson(response, 409, { error: "账户已变化或尚未登录，请刷新页面后重新核对。" });
+      }
+      const record = readRecords().find((item) => item.workDate === body.date && item.pendingStatus);
+      if (!record || record.operationTime !== body.operationTime) {
+        return sendJson(response, 409, { error: "待核对记录已变化，请刷新页面后重试。" });
+      }
+      const { result } = await runAssistant(["resolve-pending", `--payload=${encodePayload({
+        date: body.date, operationTime: body.operationTime, account: config.account, confirm: true,
+      })}`]);
+      if (!result || result.date !== body.date || !["confirmed", "released"].includes(result.resolution)) {
+        throw new Error("未能核对该日期，请刷新页面查看结果。");
+      }
+      if (result.resolution === "released") {
+        progress.releasePendingDay(batchProgressByAccount.get(batchAccountKey(config.account))?.last, body.date);
+      }
+      const message = result.resolution === "confirmed" ? `${body.date} 已同步 OA 单据。`
+        : `${body.date} 已解除本地待核对标记，可重新选择这一天。`;
+      return sendJson(response, 200, { ok: true, message, dashboard: buildDashboard() });
+    }
     if (request.method === "POST" && url.pathname === "/api/submit") {
       const body = await readBody(request);
       if (body.confirm !== true) return sendJson(response, 400, { error: "请先确认本次提交。" });
@@ -927,11 +956,17 @@ const server = http.createServer(async (request, response) => {
       log.info("fill", "submit.request", `收到提交 ${payload.dates.length} 天`, {
         dates: payload.dates, workType: payload.settings.workType, projectCode: payload.settings.projectCode, hours: payload.settings.hours,
       });
-      const result = await runAssistant([
-        "batch-submit",
-        `--payload=${encodePayload(payload)}`,
-        "--yes",
-      ], 60_000 + payload.dates.length * 120_000);
+      let result;
+      try {
+        result = await runAssistant([
+          "batch-submit",
+          `--payload=${encodePayload(payload)}`,
+          "--yes",
+        ], 60_000 + payload.dates.length * 120_000);
+      } catch (error) {
+        if (error.result?.submittedDates?.length || error.result?.unconfirmedDates?.length) scheduleAutomaticRefresh();
+        throw error;
+      }
       const dashboard = buildDashboard();
       scheduleAutomaticRefresh();
       return sendJson(response, 200, { ok: true, ...result, dashboard });

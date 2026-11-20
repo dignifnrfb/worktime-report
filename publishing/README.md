@@ -20,6 +20,8 @@ Windows 本机工时工具：钉钉扫码登录公司 OA，核对已办工时，
 
 GitHub 网络失败不影响普通填报。只安装数字正式版本，下载后核对大小及 SHA-256。安装失败不自动重试。
 
+1.3.4 修复未收到 OA 回执却标记为已提交的问题。没有明确回执时停止后续日期，显示「结果待核对」。已存在的待核对日期可在 OA 手工核对后，从日历点击「已在 OA 核对」。助手同步完整已办，找到单据就更新状态，未找到才解除该日期的本地待核对标记。
+
 ## 日常使用
 
 先确认当前 OA 账户，等同步完成，再选择日期与工作类型。休假（004）无需选择项目；其他类型需选择项目搜索结果。先预演，再确认提交，进度显示日期、阶段和失败原因。
@@ -43,7 +45,7 @@ pnpm --dir dashboard install --frozen-lockfile
 pnpm --dir dashboard run typecheck:portable
 pnpm --dir dashboard run lint:portable
 pnpm --dir dashboard run test:regression
-powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.3 -GitHubRepository 账号/仓库名
+powershell -NoProfile -File installer/build-installer.ps1 -Version 1.3.4 -GitHubRepository 账号/仓库名
 powershell -NoProfile -File tests/installer.test.ps1
 ```
 

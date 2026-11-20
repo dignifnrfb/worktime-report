@@ -8,6 +8,7 @@ const {
   EXPORT_PATH, PROJECTS_PATH, WORK_TYPES_PATH, PROFILE_ROOT,
   STATE_PATH, LOGIN_QR_PATH, loadConfig, normalizeBaseUrl, writeTextAtomic, writeJsonAtomic,
   writeLoginStatus, syncAccount, todayIso, isWorkday, mergePendingRecords, accountsMatch,
+  SUBMIT_PENDING, SUBMIT_UNKNOWN, pendingRecordState,
   canonicalProject, normalizeProjects, projectKeysMatch,
   isLeaveWorkType, withoutLeaveProject,
 } = require("./worktime-common.cjs");
@@ -843,20 +844,24 @@ async function* iterateWorktimeForms(context, firstPage, config, dates, options 
   }
 }
 
-async function clickVisibleButton(page, pattern) {
+async function clickVisibleButton(page, pattern, timeout) {
   const buttons = page.getByRole("button", { name: pattern }).filter({ visible: true });
   const count = await buttons.count().catch(() => 0);
   if (!count) return false;
-  await buttons.last().click();
+  await buttons.last().click({ timeout });
   return true;
 }
 
-function readSubmitResult() {
+function readSubmitResult(initialUrl) {
   const url = location.href;
+  const current = new URL(url);
+  const hashParams = new URLSearchParams(current.hash.split("?")[1]);
+  const requestId = current.searchParams.get("requestid") || hashParams.get("requestid") || "";
+  const isCreate = current.searchParams.get("iscreate") === "1" || hashParams.get("iscreate") === "1";
   const text = document.body?.innerText || "";
-  if ((/requestid=\d+/.test(url) && !url.includes("iscreate=1")) ||
+  if ((url !== initialUrl && /^\d+$/.test(requestId) && !isCreate) ||
       text.includes("提交成功") || text.includes("操作成功")) {
-    return { url, text };
+    return { url, text, requestId: !isCreate && /^\d+$/.test(requestId) ? requestId : "" };
   }
   return null;
 }
@@ -874,9 +879,37 @@ function isOaSubmitRequest(request) {
   return /RequestOperation|requestSubmit|doSubmit|requestOperate|wfSubmit/i.test(request.url());
 }
 
-async function submitPreparedForm(page) {
+async function submitPreparedForm(page, { receiptTimeoutMs = 8_000 } = {}) {
   let dialogError = null;
-  let requestSeen = false;
+  let transportError = null;
+  let acknowledged = false;
+  let lastHttpStatus = null;
+  let listening = true;
+  const initialUrl = page.url();
+  const origin = new URL(initialUrl).origin;
+  const requests = new Set();
+  const onRequest = (request) => {
+    if (new URL(request.url()).origin === origin && isOaSubmitRequest(request)) requests.add(request);
+  };
+  const onFailed = (request) => {
+    if (requests.has(request)) transportError = "OA 提交请求连接中断，请先核对单据。";
+  };
+  const onResponse = async (response) => {
+    if (!requests.has(response.request())) return;
+    lastHttpStatus = response.status();
+    if (lastHttpStatus >= 400) {
+      transportError = `OA 提交接口返回 HTTP ${lastHttpStatus}，请先核对单据。`;
+      return;
+    }
+    if (!response.ok() || !/\bjson\b/i.test(response.headers()["content-type"] || "")) return;
+    const receipt = await response.json().catch(() => null);
+    if (!listening || !receipt || typeof receipt !== "object") return;
+    if (receipt.success === false || receipt.ok === false || receipt.status === false || receipt.api_status === false) {
+      transportError = "OA 回执显示提交未成功，请核对表单或 OA 单据。";
+      return;
+    }
+    if (receipt.success === true || receipt.ok === true) acknowledged = true;
+  };
   const onDialog = async (dialog) => {
     try {
       await dialog.accept();
@@ -885,39 +918,48 @@ async function submitPreparedForm(page) {
     }
   };
   page.on("dialog", onDialog);
-  page.waitForRequest(isOaSubmitRequest, { timeout: 3_000 }).then(() => {
-    requestSeen = true;
-  }).catch(() => {});
+  page.on("request", onRequest);
+  page.on("requestfailed", onFailed);
+  page.on("response", onResponse);
   try {
     await page.locator('button[title="提交"]').click({ timeout: 10_000 });
     const clickedLabels = new Set();
-    const deadline = Date.now() + 2_500;
-    while (Date.now() < deadline && !page.isClosed()) {
+    const deadline = Date.now() + receiptTimeoutMs;
+    do {
       if (dialogError) throw dialogError;
-      const done = await page.evaluate(readSubmitResult).catch(() => null);
-      if (done) return done;
       const submitError = await page.evaluate(readSubmitError).catch(() => null);
       if (submitError) throw new Error(submitError);
+      if (transportError) throw new Error(transportError);
+      const done = await page.evaluate(readSubmitResult, initialUrl).catch(() => null);
+      if (done) return { ...done, receipt: "page" };
+      if (acknowledged) return { url: initialUrl, text: "", receipt: "response" };
+      if (page.isClosed() || Date.now() >= deadline) break;
       for (const [key, pattern] of [
         ["confirm", /^确\s*定$/],
         ["continue", /继续提交/],
         ["yes", /^是$/],
       ]) {
-        if (!clickedLabels.has(key) && (await clickVisibleButton(page, pattern))) clickedLabels.add(key);
+        if (!requests.size && !clickedLabels.has(key) && Date.now() < deadline &&
+            (await clickVisibleButton(page, pattern, Math.max(1, Math.min(1_000, deadline - Date.now()))))) clickedLabels.add(key);
       }
-      if (requestSeen) break;
-      await page.waitForTimeout(50);
-    }
-    if (dialogError) throw dialogError;
-    return { url: page.url(), text: "" };
+      await new Promise((resolve) => setTimeout(resolve, 75));
+    } while (true);
+    throw new Error(requests.size
+      ? "未收到 OA 的成功回执，请先核对单据。"
+      : "未检测到 OA 提交请求，请先核对单据。");
+  } catch (error) {
+    error.submitEvidence = { requestSeen: requests.size > 0, httpStatus: lastHttpStatus };
+    throw error;
   } finally {
+    listening = false;
     page.off("dialog", onDialog);
+    page.off("request", onRequest);
+    page.off("requestfailed", onFailed);
+    page.off("response", onResponse);
   }
 }
 
-function createOptimisticRecord(dateText, submission, accountName) {
-  const requestId = submission.url.match(/requestid=(\d+)/)?.[1] || "";
-  const documentNo = submission.text.match(/GSTB-\d+-\d+/)?.[0] || "";
+function createLocalSubmissionRecord(dateText, accountName) {
   const operationTime = new Intl.DateTimeFormat("zh-CN", {
     timeZone: "Asia/Shanghai",
     year: "numeric",
@@ -932,10 +974,10 @@ function createOptimisticRecord(dateText, submission, accountName) {
     .replaceAll("/", "-");
   return {
     workDate: dateText,
-    documentNo,
-    requestId,
+    documentNo: "",
+    requestId: "",
     operationTime,
-    status: "已提交·同步中",
+    status: SUBMIT_UNKNOWN,
     title: `工时填报-${accountName || "当前账户"}（工时日期:${dateText}）`,
   };
 }
@@ -1231,6 +1273,32 @@ async function runList(config) {
     });
   } finally {
     await context.close();
+  }
+}
+
+async function resolvePendingSubmission(config, date, operationTime) {
+  validateDate(date);
+  const findAttempt = () => readExportedRecords().find((item) =>
+    item.workDate === date && item.operationTime === operationTime && pendingRecordState(item));
+  const attempt = findAttempt();
+  if (!attempt) throw new Error("待核对记录已变化，请刷新页面后重试。");
+  const api = await createOaApi(config);
+  try {
+    await verifyApiSession(api);
+    const { records } = await collectDoneApi(api);
+    if (!accountsMatch(loadConfig().account, config.account) ||
+        JSON.stringify(findAttempt()) !== JSON.stringify(attempt)) {
+      throw new Error("账户或待核对记录已变化，请刷新页面后重试。");
+    }
+    const found = records.some((item) => item.workDate === date);
+    const previous = readExportedRecords().filter((item) =>
+      item.workDate !== date || !pendingRecordState(item));
+    exportDoneRecords(mergePendingRecords(records, previous));
+    log.info("fill", found ? "pending.confirmed" : "pending.released",
+      found ? "已同步 OA 正式单据" : "已按用户核对结果解除本地待核对标记", { date });
+    return { resolution: found ? "confirmed" : "released", date };
+  } finally {
+    await api.dispose().catch(() => {});
   }
 }
 
@@ -1535,7 +1603,7 @@ async function runWorktimes(config, submit, requestedDates, options = {}) {
 
   const context = await launch(config, headed);
   const submitted = [];
-  const result = { requestedDates: dates, skippedDates: [], processedDates: [], submittedDates: [] };
+  const result = { requestedDates: dates, skippedDates: [], processedDates: [], submittedDates: [], unconfirmedDates: [] };
   let currentDate = null;
   const batchStarted = Date.now();
   log.info("fill", submit ? "submit.start" : "preview.start", `${submit ? "开始提交" : "开始预演"} ${dates.length} 天`, fillContext(config, {
@@ -1590,26 +1658,35 @@ async function runWorktimes(config, submit, requestedDates, options = {}) {
       if (!submit) { emitProgress(dateText, "preview_passed"); continue; }
 
       const submitStarted = Date.now();
+      // Persist an unresolved attempt before clicking. This also protects the date
+      // after a timeout or service restart, before any receipt has arrived.
+      const record = createLocalSubmissionRecord(dateText, values.account?.name);
+      mergeExportedRecord(record);
+      result.unconfirmedDates.push(dateText);
       emitProgress(dateText, "submitting");
       log.info("fill", "day.submit.start", `开始提交 ${dateText}`, fillContext(config, {
         date: dateText, index: index + 1, total: pendingDates.length,
       }));
       const submission = await submitPreparedForm(formPage);
-      const record = createOptimisticRecord(dateText, submission, values.account?.name);
+      record.requestId = submission.requestId || "";
+      record.documentNo = submission.text.match(/GSTB-\d+-\d+/)?.[0] || "";
+      record.status = SUBMIT_PENDING;
       mergeExportedRecord(record);
+      result.unconfirmedDates.pop();
       submitted.push(record);
       result.submittedDates.push(dateText);
       emitProgress(dateText, "submitted_pending");
-      console.log(`[${index + 1}/${pendingDates.length}] 已提交：${dateText}${record.documentNo ? ` / ${record.documentNo}` : ""}`);
-      log.info("fill", "submit.day.ok", `已提交 ${dateText}`, fillContext(config, {
+      console.log(`[${index + 1}/${pendingDates.length}] 已收到 OA 提交回执：${dateText}`);
+      log.info("fill", "submit.day.acknowledged", `已收到 OA 提交回执：${dateText}`, fillContext(config, {
         date: dateText, documentNo: record.documentNo || "", requestId: record.requestId || "",
+        receipt: submission.receipt,
         index: index + 1, total: pendingDates.length,
       }), { durationMs: Date.now() - submitStarted });
     }
 
     if (submit) {
-      console.log(`批量提交完成：成功 ${submitted.length} 天。最新状态正在后台自动同步。`);
-      log.info("fill", "submit.done", `批量提交完成：成功 ${submitted.length} 天`, fillContext(config, {
+      console.log(`批量已收到 ${submitted.length} 天的 OA 提交回执，等待同步核对单据。`);
+      log.info("fill", "submit.done", `已收到 ${submitted.length} 天的 OA 提交回执`, fillContext(config, {
         submittedDates: result.submittedDates, skippedDates: result.skippedDates,
       }), { durationMs: Date.now() - batchStarted });
     } else {
@@ -1620,18 +1697,21 @@ async function runWorktimes(config, submit, requestedDates, options = {}) {
     }
     return result;
   } catch (error) {
-    if (currentDate) emitProgress(currentDate, "failed", error.message);
+    const unconfirmed = result.unconfirmedDates.includes(currentDate);
+    const detail = unconfirmed ? `${currentDate} 提交结果待核对：${error.message}` : error.message;
+    if (currentDate) emitProgress(currentDate, unconfirmed ? "unknown" : "failed", detail);
     console.log(`WORKTIME_RESULT:${JSON.stringify(result)}`);
-    log.logError("fill", submit ? "submit.fail" : "preview.fail", error, error.message, fillContext(config, {
+    log.logError("fill", submit ? "submit.fail" : "preview.fail", error, detail, fillContext(config, {
       date: currentDate,
       processedDates: result.processedDates,
       submittedDates: result.submittedDates,
+      unconfirmedDates: result.unconfirmedDates,
+      ...error.submitEvidence,
       skippedDates: result.skippedDates,
       remainingCount: dates.length - result.skippedDates.length - result.processedDates.length,
     }), { durationMs: Date.now() - batchStarted });
-    if (submitted.length) {
-      throw new Error(`${error.message}\n已成功提交 ${submitted.length} 天，已写入本地记录；失败日期及其后日期未继续处理。`);
-    }
+    if (unconfirmed || submitted.length) throw new Error(
+      `${detail}\n本批次已停止。已有 ${submitted.length} 天收到 OA 回执，请同步已办核对。`, { cause: error });
     throw error;
   } finally {
     if (submitted.length) await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -1666,7 +1746,7 @@ function printHelp() {
       检查重复后实际提交一次。
 
   批量模式由本地工时面板调用：同一次登录会话可连续处理多个日期。
-  提交后不等待 OA 成功页，本地先记为已提交，再由同步确认结果。
+  收到 OA 提交回执后等待已办同步；没有回执时停止并标为结果待核对。
 
 可选参数：--headed（显示脚本自己的浏览器窗口，用于排查问题）
 `);
@@ -1698,6 +1778,12 @@ async function main() {
   if (command === "login-qr") return runQrLogin(config);
   if (command === "session-check") return runSessionCheck(config);
   if (command === "list") return runList(config);
+  if (command === "resolve-pending") {
+    if (!payload.account || payload.confirm !== true || typeof payload.operationTime !== "string") {
+      throw new Error("请先在 OA 核对这一天的单据。");
+    }
+    return resolvePendingSubmission(config, payload.date, payload.operationTime);
+  }
   if (command === "projects") return runProjects(config);
   if (command === "work-types") return runWorkTypes(config);
   if (command === "startup-sync") return runStartupSync(config);
@@ -1717,7 +1803,7 @@ if (require.main === module) {
   log.configureLogger({ proc: "assistant", cmd: command });
   log.installProcessHandlers();
   main().then((result) => {
-    if (result?.requestedDates) console.log(`WORKTIME_RESULT:${JSON.stringify(result)}`);
+    if (result?.requestedDates || result?.resolution) console.log(`WORKTIME_RESULT:${JSON.stringify(result)}`);
   }).catch((error) => {
     const channel = log.channelForCommand(command);
     if (error.message === "LOGIN_REQUIRED") {
@@ -1729,7 +1815,7 @@ if (require.main === module) {
       console.error(error.message);
     } else {
       if (command === "session-check") writeLoginStatus({ state: "unavailable", message: "暂时无法验证 OA 登录，请检查网络后重试。" });
-      if (!/已成功提交 \d+ 天/.test(error.message)) {
+      if (!error.cause?.submitEvidence && !error.message.includes("本批次已停止")) {
         log.logError(channel, command.includes("submit") ? "submit.fail" : "command.fail", error, error.message, { command });
       }
       console.error(`失败：${error.message}`);
